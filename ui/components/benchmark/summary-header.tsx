@@ -8,6 +8,12 @@ interface SummaryHeaderProps {
   data: BenchmarkData;
 }
 
+function shortModel(model: string): string {
+  const withoutProvider = model.includes(":") ? model.split(":").slice(1).join(":") : model;
+  const parts = withoutProvider.split("/");
+  return parts[parts.length - 1] ?? withoutProvider;
+}
+
 function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = Math.round(seconds % 60);
@@ -16,6 +22,7 @@ function formatTime(seconds: number): string {
 
 export function SummaryHeader({ data }: SummaryHeaderProps) {
   const latestVersion = data.summary.latestVersion.toUpperCase();
+  const modelLabels = (data.summary.models ?? []).map(shortModel);
 
   return (
     <div className="border-b border-hud-border bg-hud-panel px-6 py-4">
@@ -52,7 +59,7 @@ export function SummaryHeader({ data }: SummaryHeaderProps) {
           Models
         </span>
         <p className="mt-1 text-[13px] leading-relaxed text-foreground/90">
-          gpt-5.3-codex / gpt-4.1-mini / qwen3-30b / moondream3
+          {modelLabels.length > 0 ? modelLabels.join(" / ") : "No benchmark model metadata found"}
         </p>
       </div>
     </div>

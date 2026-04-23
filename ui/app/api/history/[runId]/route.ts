@@ -1,6 +1,7 @@
 import { readdir, readFile } from "fs/promises";
 import { join } from "path";
 import { NextResponse, type NextRequest } from "next/server";
+import { normalizeTraceEvents } from "@/lib/trace-events";
 
 const DATA_DIR = join(process.cwd(), "..", "data");
 
@@ -36,5 +37,8 @@ export async function GET(
   }
   const raw = await readFile(manifestPath, "utf-8");
   const data = JSON.parse(raw);
+  if (Array.isArray(data.trace_events)) {
+    data.trace_events = normalizeTraceEvents(data.trace_events);
+  }
   return NextResponse.json(data);
 }

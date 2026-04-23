@@ -195,6 +195,51 @@ class Tracer:
         with self._span("sanjaya.sub_llm_call.regular", model=model, prompt_chars=len(prompt), **kwargs) as ctx:
             yield ctx
 
+    @contextmanager
+    def video_inspection(self, *, model: str, prompt: str, **kwargs: Any) -> Generator[TraceContext, None, None]:
+        """Native video slice inspection."""
+        with self._span("sanjaya.video_inspection", model=model, prompt_chars=len(prompt), **kwargs) as ctx:
+            yield ctx
+
+    @contextmanager
+    def frame_inspection(self, *, model: str, prompt: str, **kwargs: Any) -> Generator[TraceContext, None, None]:
+        """Single-frame inspection."""
+        with self._span("sanjaya.frame_inspection", model=model, prompt_chars=len(prompt), **kwargs) as ctx:
+            yield ctx
+
+    @contextmanager
+    def audio_analysis(self, *, model: str, prompt: str, **kwargs: Any) -> Generator[TraceContext, None, None]:
+        """Native audio analysis / transcription."""
+        with self._span("sanjaya.audio_analysis", model=model, prompt_chars=len(prompt), **kwargs) as ctx:
+            yield ctx
+
+    @contextmanager
+    def subcall(
+        self,
+        *,
+        depth: int,
+        prompt: str,
+        child_model: str,
+        start_s: float | None = None,
+        end_s: float | None = None,
+        **kwargs: Any,
+    ) -> Generator[TraceContext, None, None]:
+        """Recursive child RLM span."""
+        payload: dict[str, Any] = {
+            "depth": depth,
+            "child_model": child_model,
+            "prompt_chars": len(prompt),
+            "prompt_preview": prompt[:200],
+        }
+        if start_s is not None:
+            payload["start_s"] = start_s
+        if end_s is not None:
+            payload["end_s"] = end_s
+
+        with self._span("sanjaya.rlm_subcall", **payload, **kwargs) as ctx:
+            ctx.record_content(prompt=prompt)
+            yield ctx
+
     # ── Events ──────────────────────────────────────────────
 
     @property
@@ -209,4 +254,3 @@ class Tracer:
     def dump_events(self) -> list[dict[str, Any]]:
         """Dump all events (alias for events property)."""
         return self._event_buffer.events
-

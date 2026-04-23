@@ -6,18 +6,9 @@ import { Panel } from "./panel";
 import { VideoPreviewModal } from "./video-preview-modal";
 import { fetchVideos, type VideoEntry } from "@/lib/api";
 
-const SUBTITLE_MODES = ["none", "auto", "local", "api"] as const;
-const SUBTITLE_API_MODELS = [
-  "gpt-4o-transcribe-diarize",
-  "whisper-1",
-  "gpt-4o-mini-transcribe",
-] as const;
-
 interface RunParams {
   videoPath: string;
   question: string;
-  subtitleMode: string;
-  subtitleApiModel: string;
   maxIterations: number;
 }
 
@@ -31,8 +22,6 @@ export function QueryInput({ onSubmit, onVideoChange, disabled }: QueryInputProp
   const [videos, setVideos] = useState<VideoEntry[]>([]);
   const [videoPath, setVideoPath] = useState("");
   const [question, setQuestion] = useState("");
-  const [subtitleMode, setSubtitleMode] = useState("none");
-  const [subtitleApiModel, setSubtitleApiModel] = useState("gpt-4o-transcribe-diarize");
   const [maxIterations, setMaxIterations] = useState(20);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [showPreview, setShowPreview] = useState(false);
@@ -57,8 +46,6 @@ export function QueryInput({ onSubmit, onVideoChange, disabled }: QueryInputProp
       onSubmit({
         videoPath: videoPath.trim(),
         question: question.trim(),
-        subtitleMode,
-        subtitleApiModel,
         maxIterations,
       });
     }
@@ -118,7 +105,7 @@ export function QueryInput({ onSubmit, onVideoChange, disabled }: QueryInputProp
               selectedVideo.hasTranscript ? "text-hud-green" : "text-hud-dim"
             }`}>
               {selectedVideo.hasTranscript
-                ? "● transcript loaded — will be used automatically"
+                ? "● transcript sidecar available for preview"
                 : "○ no transcript sidecar found"}
             </p>
           )}
@@ -138,33 +125,7 @@ export function QueryInput({ onSubmit, onVideoChange, disabled }: QueryInputProp
         </div>
 
         {/* Control knobs row */}
-        <div className="grid grid-cols-3 gap-2">
-          <div>
-            <label className={labelClass}>SUBTITLE MODE</label>
-            <select
-              value={subtitleMode}
-              onChange={(e) => setSubtitleMode(e.target.value)}
-              disabled={disabled}
-              className={selectClass}
-            >
-              {SUBTITLE_MODES.map((m) => (
-                <option key={m} value={m}>{m}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className={labelClass}>SUBTITLE MODEL</label>
-            <select
-              value={subtitleApiModel}
-              onChange={(e) => setSubtitleApiModel(e.target.value)}
-              disabled={disabled || subtitleMode === "none" || subtitleMode === "local"}
-              className={selectClass}
-            >
-              {SUBTITLE_API_MODELS.map((m) => (
-                <option key={m} value={m}>{m}</option>
-              ))}
-            </select>
-          </div>
+        <div className="grid grid-cols-1 gap-2">
           <div>
             <label className={labelClass}>MAX ITERATIONS</label>
             <input

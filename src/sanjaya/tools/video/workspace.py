@@ -18,12 +18,14 @@ class ArtifactWorkspace:
         self.run_dir = self.base_dir / self.run_id
         self.clips_dir = self.run_dir / "clips"
         self.frames_dir = self.run_dir / "frames"
+        self.audio_dir = self.run_dir / "audio"
         self.manifest_path = self.run_dir / "manifest.json"
 
         self._manifest: dict[str, Any] = {
             "run_id": self.run_id,
             "clips": {},
             "candidate_windows": [],
+            "media_operations": [],
             "trace_events": [],
         }
 
@@ -32,6 +34,7 @@ class ArtifactWorkspace:
     def ensure(self) -> None:
         self.clips_dir.mkdir(parents=True, exist_ok=True)
         self.frames_dir.mkdir(parents=True, exist_ok=True)
+        self.audio_dir.mkdir(parents=True, exist_ok=True)
         if not self.manifest_path.exists():
             self._flush_manifest()
 
@@ -40,6 +43,12 @@ class ArtifactWorkspace:
 
     def frame_dir(self, clip_id: str) -> Path:
         return self.frames_dir / clip_id
+
+    def frame_path(self, frame_id: str) -> Path:
+        return self.frames_dir / f"{frame_id}.jpg"
+
+    def audio_path(self, audio_id: str) -> Path:
+        return self.audio_dir / f"{audio_id}.wav"
 
     def record_windows(self, windows: list[dict[str, Any]]) -> None:
         self._manifest["candidate_windows"] = windows
@@ -57,6 +66,10 @@ class ArtifactWorkspace:
         if clip is None:
             return
         clip["frame_paths"] = frame_paths
+        self._flush_manifest()
+
+    def record_media_operation(self, operation: dict[str, Any]) -> None:
+        self._manifest["media_operations"].append(operation)
         self._flush_manifest()
 
     def record_trace_events(self, trace_events: list[dict[str, Any]]) -> None:

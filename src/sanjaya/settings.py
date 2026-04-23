@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     # OpenRouter (primary provider)
     openrouter_api_key: str | None = None
 
+    # Google / Vertex AI (native Gemini video + audio)
+    google_api_key: str | None = None
+    google_cloud_project: str | None = None
+    google_cloud_location: str = "global"
+
     # Moondream (vision)
     moondream_api_key: str | None = None
 

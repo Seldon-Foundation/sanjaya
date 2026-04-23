@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useEffect, useRef, useState } from "react";
 import { Panel } from "./panel";
 import { frameUrl } from "@/lib/api";
@@ -16,34 +17,28 @@ function getEventColor(kind: string): string {
     case "run_end":
       return "text-foreground";
     case "root_response":
-    case "root_response_start":
       return "text-hud-blue";
     case "code_execution":
     case "code_instruction":
       return "text-hud-green";
-    case "iteration_start":
     case "iteration_end":
       return "text-hud-amber";
-    case "retrieval":
-      return "text-hud-amber";
-    case "clip":
-    case "frames":
-      return "text-hud-cyan";
     case "vision":
       return "text-hud-magenta";
+    case "subcall":
+      return "text-hud-green";
     case "sub_llm":
-    case "sub_llm_start":
       return "text-hud-dim";
     case "tool_call":
-    case "tool_call_start":
+    case "frame_inspection":
       return "text-hud-cyan";
+    case "video_inspection":
+      return "text-hud-magenta";
+    case "audio_analysis":
     case "schema_generation":
-    case "schema_generation_start":
       return "text-hud-label";
     case "critic_evaluation":
       return "text-hud-amber";
-    case "transcription":
-      return "text-hud-label";
     default:
       return "text-hud-dim";
   }
@@ -55,27 +50,26 @@ function getDotColor(kind: string): string {
     case "run_end":
       return "bg-foreground";
     case "root_response":
-    case "root_response_start":
       return "bg-hud-blue";
     case "code_execution":
     case "code_instruction":
       return "bg-hud-green";
-    case "iteration_start":
     case "iteration_end":
       return "bg-hud-amber";
-    case "retrieval":
-      return "bg-hud-amber";
-    case "clip":
-    case "frames":
-      return "bg-hud-cyan";
     case "vision":
       return "bg-hud-magenta";
+    case "subcall":
+      return "bg-hud-green";
     case "sub_llm":
-    case "sub_llm_start":
       return "bg-hud-dim";
     case "tool_call":
-    case "tool_call_start":
+    case "frame_inspection":
       return "bg-hud-cyan";
+    case "video_inspection":
+      return "bg-hud-magenta";
+    case "audio_analysis":
+    case "schema_generation":
+      return "bg-hud-label";
     case "critic_evaluation":
       return "bg-hud-amber";
     default:
@@ -83,47 +77,95 @@ function getDotColor(kind: string): string {
   }
 }
 
+function eventDepth(event: TraceEvent): number {
+  const depth = event.payload?.depth;
+  return typeof depth === "number" && Number.isFinite(depth) ? Math.max(0, depth) : 0;
+}
+
+function eventLabel(kind: string): string {
+  switch (kind) {
+    case "run_start":
+      return "Run Start";
+    case "run_end":
+      return "Run End";
+    case "iteration_end":
+      return "Iteration";
+    case "root_response":
+      return "Root LLM";
+    case "code_instruction":
+      return "Code Plan";
+    case "code_execution":
+      return "Code Exec";
+    case "subcall":
+      return "RLM Subcall";
+    case "sub_llm":
+      return "Sub LLM";
+    case "tool_call":
+      return "Tool Call";
+    case "video_inspection":
+      return "Inspect Video";
+    case "frame_inspection":
+      return "Inspect Frame";
+    case "audio_analysis":
+      return "Analyze Audio";
+    case "schema_generation":
+      return "Schema";
+    case "critic_evaluation":
+      return "Critic";
+    case "vision":
+      return "Vision";
+    case "image_inspection":
+      return "Image";
+    case "image_compare":
+      return "Compare";
+    default:
+      return kind.replaceAll("_", " ");
+  }
+}
+
+function shortModelName(model: unknown): string {
+  if (typeof model !== "string" || model.length === 0) return "?";
+  const parts = model.split("/");
+  return parts[parts.length - 1] || model;
+}
+
 function getEventSummary(event: TraceEvent): string {
   const p = event.payload;
   if (!p) return "";
+
+  const depthPrefix = eventDepth(event) > 0 ? `d${eventDepth(event)} ` : "";
+
   try {
     switch (event.kind) {
       case "run_start":
-        return `${(p.model as string) ?? (p.orchestrator_model as string) ?? ""} — ${p.question ? `"${(p.question as string).slice(0, 60)}"` : ""}`;
+        return `${shortModelName((p.model as string) ?? (p.orchestrator_model as string) ?? "")}${p.question ? ` · "${(p.question as string).slice(0, 72)}"` : ""}`;
       case "run_end":
         return `status=${p.status ?? "complete"} tokens=${p.input_tokens ?? "?"}/${p.output_tokens ?? "?"}`;
-      case "iteration_start":
-        return `iteration ${p.iteration ?? "?"}`;
       case "iteration_end":
-        return `iteration ${p.iteration ?? "?"} done${p.final_answer ? " ✓FINAL" : ""}${p.critic_rejected ? " ✗CRITIC" : ""}`;
-      case "root_response_start":
-        return `model=${p.model ?? "?"}`;
+        return `${depthPrefix}iteration ${p.iteration ?? "?"}${p.final_answer ? " · final" : ""}${p.critic_rejected ? " · critic retry" : ""}`;
       case "root_response":
-        return `model=${p.model ?? "?"} ${p.input_tokens ? `IN:${p.input_tokens}` : ""} ${p.output_tokens ? `OUT:${p.output_tokens}` : ""}`;
+        return `${depthPrefix}${shortModelName(p.model)}${p.input_tokens ? ` · in ${p.input_tokens}` : ""}${p.output_tokens ? ` · out ${p.output_tokens}` : ""}${p.response_preview ? ` · ${(p.response_preview as string).slice(0, 70)}` : ""}`;
       case "code_instruction":
-        return `code_preview=${((p.code_preview as string) ?? "").slice(0, 60)}`;
+        return `${depthPrefix}${((p.code_preview as string) ?? "").slice(0, 72)}`;
       case "code_execution":
-        return `block=${p.block_index ?? "?"} ${(p.execution_time_s as number)?.toFixed(2) ?? (p.execution_time as number)?.toFixed(2) ?? "?"}s tools=[${(p.tools_used as string[])?.join(", ") ?? ""}]${p.final_answer ? " ✓FINAL" : ""}`;
+        return `${depthPrefix}block ${p.block_index ?? "?"} · ${(p.execution_time_s as number)?.toFixed(2) ?? (p.execution_time as number)?.toFixed(2) ?? "?"}s${(p.tools_used as string[])?.length ? ` · ${(p.tools_used as string[])?.join(", ")}` : ""}${p.final_answer ? " · final" : ""}`;
       case "tool_call":
-      case "tool_call_start":
-        return `${p.tool_name ?? "?"}`;
-      case "retrieval":
-        return `subtitle=${p.subtitle_count ?? 0} sliding=${p.sliding_count ?? 0} selected=${p.selected_count ?? 0}`;
-      case "clip":
-        return `${p.clip_id ?? "?"} [${(p.start_s as number)?.toFixed(1) ?? "?"}s - ${(p.end_s as number)?.toFixed(1) ?? "?"}s]`;
-      case "frames":
-        return `${p.clip_id ?? "?"} → ${p.frame_count ?? 0} frames`;
-      case "vision":
-        return `${p.frame_count ?? 0}f/${p.clip_count ?? 0}c${p.model_used ? ` model=${p.model_used}` : (p.model as string) ? ` model=${p.model}` : ""}`;
+        return `${depthPrefix}${p.tool_name ?? "?"}`;
+      case "video_inspection":
+      case "frame_inspection":
+      case "audio_analysis":
+        return `${depthPrefix}[${(p.start_s as number)?.toFixed(1) ?? "?"}s - ${(p.end_s as number)?.toFixed(1) ?? "?"}s]${p.model_used ? ` · ${shortModelName(p.model_used)}` : (p.model as string) ? ` · ${shortModelName(p.model)}` : ""}${p.response_preview ? ` · ${(p.response_preview as string).slice(0, 70)}` : ""}`;
+      case "subcall":
+        return `${depthPrefix}${shortModelName(p.child_model)}${p.start_s != null && p.end_s != null ? ` · [${(p.start_s as number).toFixed(1)}s - ${(p.end_s as number).toFixed(1)}s]` : ""}${p.iterations_used != null ? ` · ${p.iterations_used} iters` : ""}${p.response_preview ? ` · ${(p.response_preview as string).slice(0, 70)}` : p.prompt_preview ? ` · ${(p.prompt_preview as string).slice(0, 70)}` : ""}`;
       case "sub_llm":
-        return `model=${p.model ?? "?"} ${((p.response_preview as string) ?? (p.prompt_preview as string) ?? "").slice(0, 60)}`;
-      case "sub_llm_start":
-        return `model=${p.model ?? "?"} ${p.prompt_chars ?? "?"}ch`;
+      case "vision":
+      case "image_inspection":
+      case "image_compare":
+        return `${depthPrefix}${shortModelName(p.model ?? p.model_used)} · ${((p.response_preview as string) ?? (p.prompt_preview as string) ?? "").slice(0, 70)}`;
       case "schema_generation":
-      case "schema_generation_start":
         return `question=${p.question_chars ?? "?"}ch`;
       case "critic_evaluation":
-        return `score=${p.score ?? "?"}/100 ${p.pass ? "✓PASS" : "✗FAIL"} ${((p.feedback as string) ?? "").slice(0, 50)}`;
+        return `${depthPrefix}score=${p.score ?? "?"}/100 ${p.pass ? "✓PASS" : "✗FAIL"} ${((p.feedback as string) ?? "").slice(0, 50)}`;
       case "transcription":
         return `source=${p.source ?? "?"} path=${p.subtitle_path ?? "none"}`;
       default:
@@ -134,7 +176,6 @@ function getEventSummary(event: TraceEvent): string {
   }
 }
 
-/** Keys to show as code/pre blocks instead of inline values. */
 const CODE_KEYS = new Set([
   "code", "code_preview", "code_content",
   "response_content", "response_preview",
@@ -145,13 +186,11 @@ const CODE_KEYS = new Set([
   "llm_queries_preview",
 ]);
 
-/** Keys to skip in the detail view (noise or redundant). */
 const SKIP_KEYS = new Set([
   "prompt_chars", "response_chars", "code_chars",
   "question_chars", "n_frames",
 ]);
 
-/** Keys that contain image paths to render as thumbnails. */
 const IMAGE_PATH_KEYS = new Set([
   "frame_paths",
 ]);
@@ -170,17 +209,19 @@ function EventDetail({ payload }: { payload: Record<string, unknown> }) {
   return (
     <div className="space-y-1.5">
       {entries.map(([key, value]) => {
-        // Render frame_paths as image thumbnails
         if (IMAGE_PATH_KEYS.has(key) && Array.isArray(value) && value.length > 0) {
           return (
             <div key={key}>
               <span className="text-hud-dim uppercase tracking-wider">{key}: </span>
-              <div className="flex gap-1 overflow-x-auto py-1 mt-0.5">
+              <div className="mt-0.5 flex gap-1 overflow-x-auto py-1">
                 {(value as string[]).map((path, i) => (
-                  <img
+                  <Image
                     key={i}
                     src={frameUrl(path)}
                     alt={`frame ${i + 1}`}
+                    width={160}
+                    height={80}
+                    unoptimized
                     className="h-20 w-auto shrink-0 border border-hud-border/50 object-cover"
                     loading="lazy"
                   />
@@ -199,11 +240,11 @@ function EventDetail({ payload }: { payload: Record<string, unknown> }) {
           <div key={key}>
             <span className="text-hud-dim uppercase tracking-wider">{key}: </span>
             {isCode || isLongString ? (
-              <pre className="mt-0.5 px-2 py-1 bg-[#111] border border-hud-border/50 text-foreground/80 whitespace-pre-wrap break-all max-h-48 overflow-auto">
+              <pre className="mt-0.5 max-h-48 overflow-auto border border-hud-border/50 bg-[#111] px-2 py-1 whitespace-pre-wrap break-all text-foreground/80">
                 {String(value)}
               </pre>
             ) : isObject || isArray ? (
-              <pre className="mt-0.5 px-2 py-1 bg-[#111] border border-hud-border/50 text-foreground/80 whitespace-pre-wrap break-all max-h-48 overflow-auto">
+              <pre className="mt-0.5 max-h-48 overflow-auto border border-hud-border/50 bg-[#111] px-2 py-1 whitespace-pre-wrap break-all text-foreground/80">
                 {JSON.stringify(value, null, 2)}
               </pre>
             ) : (
@@ -220,27 +261,24 @@ function EventDetail({ payload }: { payload: Record<string, unknown> }) {
   );
 }
 
-/** Event kinds worth showing in the timeline. Noisy _start events are hidden. */
 const VISIBLE_KINDS = new Set([
   "run_start",
   "run_end",
-  "iteration_start",
   "iteration_end",
-  "root_response_start",
   "root_response",
   "code_instruction",
   "code_execution",
-  "sub_llm_start",
+  "subcall",
   "sub_llm",
-  "vision_start",
-  "vision",
+  "video_inspection",
+  "frame_inspection",
+  "audio_analysis",
   "tool_call",
   "schema_generation",
   "critic_evaluation",
-  "transcription",
-  "retrieval",
-  "clip",
-  "frames",
+  "vision",
+  "image_inspection",
+  "image_compare",
 ]);
 
 export function TraceTimeline({ events, startTime }: TraceTimelineProps) {
@@ -257,7 +295,7 @@ export function TraceTimeline({ events, startTime }: TraceTimelineProps) {
   }, [visibleEvents.length]);
 
   return (
-    <Panel title="TRACE TIMELINE" className="h-full flex flex-col">
+    <Panel title="TRACE TIMELINE" className="flex h-full flex-col">
       {visibleEvents.length === 0 ? (
         <span className="text-[12px] uppercase tracking-wider text-hud-dim">
           NO DATA YET
@@ -265,56 +303,51 @@ export function TraceTimeline({ events, startTime }: TraceTimelineProps) {
       ) : (
         <div
           ref={scrollRef}
-          className="space-y-0 text-[12px] overflow-y-auto flex-1 min-h-0"
+          className="min-h-0 flex-1 space-y-0 overflow-y-auto text-[12px]"
         >
           {visibleEvents.map((event, i) => {
             const diff = startTime && event.timestamp ? event.timestamp - startTime : 0;
             const relativeS = Number.isFinite(diff) ? diff.toFixed(1) : "0.0";
             const isExpanded = expandedIndex === i;
             const hasPayload = event.payload && Object.keys(event.payload).length > 0;
+            const depth = eventDepth(event);
 
             return (
               <div
                 key={i}
                 className="border-b border-hud-border/30 last:border-0"
               >
-                {/* Summary row */}
                 <button
                   type="button"
                   onClick={() => hasPayload && setExpandedIndex(isExpanded ? null : i)}
-                  className={`w-full flex items-center gap-2 py-0.5 text-left ${
+                  className={`flex w-full items-center gap-2 py-0.5 text-left ${
                     hasPayload ? "cursor-pointer hover:bg-[#141414]" : "cursor-default"
                   }`}
+                  style={{ paddingLeft: `${depth * 12}px` }}
                 >
-                  {/* Timestamp */}
-                  <span className="text-hud-dim tabular-nums w-14 shrink-0 text-right leading-none">
+                  <span className="w-14 shrink-0 text-right tabular-nums leading-none text-hud-dim">
                     +{relativeS}s
                   </span>
-                  {/* Dot */}
                   <span
                     className={`h-1.5 w-1.5 shrink-0 ${getDotColor(event.kind)}`}
                   />
-                  {/* Kind */}
                   <span
-                    className={`uppercase shrink-0 w-32 font-bold tracking-wider leading-none ${getEventColor(event.kind)}`}
+                    className={`w-32 shrink-0 uppercase font-bold tracking-wider leading-none ${getEventColor(event.kind)}`}
                   >
-                    {event.kind}
+                    {eventLabel(event.kind)}
                   </span>
-                  {/* Summary */}
-                  <span className="text-hud-dim truncate leading-none flex-1">
+                  <span className="min-w-0 flex-1 truncate leading-none text-hud-dim">
                     {getEventSummary(event)}
                   </span>
-                  {/* Expand indicator */}
                   {hasPayload && (
-                    <span className="text-hud-dim shrink-0 w-4 text-center">
+                    <span className="w-4 shrink-0 text-center text-hud-dim">
                       {isExpanded ? "−" : "+"}
                     </span>
                   )}
                 </button>
 
-                {/* Expanded detail */}
                 {isExpanded && event.payload && (
-                  <div className="ml-[4.5rem] mr-2 mb-1.5 mt-0.5 p-2 border border-hud-border/50 bg-[#0d0d0d]">
+                  <div className="mb-1.5 mr-2 mt-0.5 border border-hud-border/50 bg-[#0d0d0d] p-2" style={{ marginLeft: `${72 + depth * 12}px` }}>
                     <EventDetail payload={event.payload} />
                   </div>
                 )}

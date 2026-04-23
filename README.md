@@ -1,6 +1,6 @@
 # Sanjaya
 
-Sanjaya is an open-source Python library inspired by Recursive Language Model (RLM) agents, built for multimodal understanding: video, documents, and images. Instead of prompting a model to answer a question, the model writes a Python program that answers it. The program searches transcripts, extracts video clips, samples frames, queries vision models, and iterates, all inside a sandboxed Read Eval Print Loop (REPL).
+Sanjaya is an open-source Python library inspired by Recursive Language Model (RLM) agents, built for multimodal understanding: video, documents, and images. Instead of prompting a model to answer a question, the model writes a Python program that answers it. For video runs, the live RLM now works on explicit native video/audio slices to avoid context rot: it inspects short spans, delegates scoped subcalls, and iterates inside a sandboxed Read Eval Print Loop (REPL).
 
 ## Why the name?
 
@@ -24,9 +24,11 @@ uv add "sanjaya[all]"        # everything
 
 ## Configuration
 
-Set at least:
+Set at least one Google/Vertex credential path:
 
-- `OPENROUTER_API_KEY`
+- `GOOGLE_API_KEY`
+- `GOOGLE_CLOUD_PROJECT`
+- `GOOGLE_CLOUD_LOCATION` (defaults to `global`)
 
 Optional (depends on your model/provider setup):
 
@@ -62,7 +64,11 @@ print(answer.text)
 print(answer.evidence)
 ```
 
-When `video=...` is provided, `VideoToolkit` is auto-registered if you have not already added one.
+When `video=...` is provided, `VideoToolkit` is auto-registered if you have not already added one. The live video path uses native slice-based tools:
+
+- `inspect_video(prompt, start_s, end_s)`
+- `analyze_audio(start_s, end_s, prompt=None)`
+- `llm_query(...)` / `rlm_query(...)` with optional `start_s` / `end_s` for explicit scoped delegation
 
 ## Document analysis
 
@@ -151,17 +157,17 @@ If you are working from the repository:
 
 ### Custom model configuration
 
-Configure different models for orchestration, sub-queries, and vision:
+Configure different models for orchestration, sub-queries, and audio/video analysis:
 
 ```python
 from sanjaya import Agent
 
 agent = Agent(
-    model="openrouter:anthropic/claude-sonnet-4",  # Main orchestrator
-    sub_model="openrouter:openai/gpt-4.1-mini",     # For llm_query() calls
-    vision_model="openrouter:openai/gpt-4.1",      # For vision_query() calls
-    caption_model="moondream:moondream3-preview",  # Cheap frame captioning
-    fallback_model="openrouter:google/gemini-2.5-flash",  # Fallback on errors
+    model="google-vertex:gemini-3.1-pro-preview",   # Main orchestrator
+    sub_model="google-vertex:gemini-3.1-pro-preview",  # llm_query / rlm_query
+    vision_model="google-vertex:gemini-3.1-pro-preview",  # native video slices
+    audio_model="google-vertex:gemini-3-flash-preview",   # analyze_audio
+    caption_model="moondream:moondream3-preview",  # Optional for image workflows
     critic_model="openrouter:qwen/qwen3-30b-a3b-thinking-2507",  # Answer critic
 )
 ```

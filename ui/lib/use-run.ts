@@ -8,8 +8,7 @@ import type {
   TokenTotals,
   CodeExecution,
   SubLLMCall,
-  ClipEntry,
-  VisionEntry,
+  MediaOperationEntry,
 } from "./types";
 
 const initialState: RunState = {
@@ -29,9 +28,15 @@ const initialState: RunState = {
 export function useRun() {
   const [state, setState] = useState<RunState>(initialState);
   const cleanupRef = useRef<(() => void) | null>(null);
+  const seenEventKeysRef = useRef<Set<string>>(new Set());
 
   const handleEvent = useCallback((event: TraceEvent) => {
     setState((prev) => {
+      const key = `${event.kind}:${event.timestamp}:${JSON.stringify(event.payload)}`;
+      if (seenEventKeysRef.current.has(key)) {
+        return prev;
+      }
+      seenEventKeysRef.current.add(key);
       const events = [...prev.events, event];
       const p = event.payload;
 
@@ -92,8 +97,6 @@ export function useRun() {
     async (params: {
       videoPath: string;
       question: string;
-      subtitleMode?: string;
-      subtitleApiModel?: string;
       maxIterations?: number;
     }) => {
       // Cleanup any existing connection
@@ -103,14 +106,13 @@ export function useRun() {
       }
 
       // Reset state
+      seenEventKeysRef.current = new Set();
       setState({ ...initialState, status: "running" });
 
       try {
         const { run_id } = await submitRun({
           video_path: params.videoPath,
           question: params.question,
-          subtitle_mode: params.subtitleMode,
-          subtitle_api_model: params.subtitleApiModel,
           max_iterations: params.maxIterations,
         });
 
@@ -148,6 +150,7 @@ export function useRun() {
       cleanupRef.current();
       cleanupRef.current = null;
     }
+    seenEventKeysRef.current = new Set();
     setState(initialState);
   }, []);
 
@@ -155,8 +158,7 @@ export function useRun() {
   const tokenTotals: TokenTotals = deriveTokenTotals(state.events);
   const codeExecutions: CodeExecution[] = deriveCodeExecutions(state.events);
   const subLLMCalls: SubLLMCall[] = deriveSubLLMCalls(state.events);
-  const clips: ClipEntry[] = deriveClips(state.events);
-  const visionQueries: VisionEntry[] = deriveVisionQueries(state.events);
+  const mediaOperations: MediaOperationEntry[] = deriveMediaOperations(state.events);
 
   return {
     state,
@@ -165,8 +167,7 @@ export function useRun() {
     tokenTotals,
     codeExecutions,
     subLLMCalls,
-    clips,
-    visionQueries,
+    mediaOperations,
   };
 }
 
@@ -177,7 +178,7 @@ function deriveTokenTotals(events: TraceEvent[]): TokenTotals {
   let costUsd = 0;
 
   const tokenEventKinds = new Set([
-    "root_response", "sub_llm", "vision",
+    "root_response", "sub_llm", "video_inspection", "frame_inspection", "audio_analysis",
     "schema_generation", "critic_evaluation",
   ]);
 
@@ -230,49 +231,23 @@ function deriveSubLLMCalls(events: TraceEvent[]): SubLLMCall[] {
     });
 }
 
-function deriveClips(events: TraceEvent[]): ClipEntry[] {
-  const clipMap = new Map<string, ClipEntry>();
-
-  for (const e of events) {
-    if (e.kind === "clip") {
-      const clipId = e.payload.clip_id as string;
-      clipMap.set(clipId, {
-        clipId,
-        startS: (e.payload.start_s as number) ?? 0,
-        endS: (e.payload.end_s as number) ?? 0,
-        clipPath: (e.payload.clip_path as string) ?? "",
-        frameCount: 0,
-      });
-    }
-    if (e.kind === "frames") {
-      const clipId = e.payload.clip_id as string;
-      const existing = clipMap.get(clipId);
-      if (existing) {
-        existing.frameCount = (e.payload.frame_count as number) ?? 0;
-      }
-    }
-  }
-
-  return Array.from(clipMap.values());
-}
-
-function deriveVisionQueries(events: TraceEvent[]): VisionEntry[] {
+function deriveMediaOperations(events: TraceEvent[]): MediaOperationEntry[] {
   return events
-    .filter((e) => e.kind === "vision")
+    .filter((e) => e.kind === "video_inspection" || e.kind === "frame_inspection" || e.kind === "audio_analysis")
     .map((e) => {
       const p = e.payload;
       return {
+        kind: e.kind as MediaOperationEntry["kind"],
+        startS: (p.start_s as number) ?? 0,
+        endS: (p.end_s as number) ?? 0,
         prompt: (p.prompt as string) ?? (p.prompt_content as string)?.slice(0, 200) ?? "",
-        frameCount: (p.frame_count as number) ?? (p.n_frames as number) ?? 0,
-        clipCount: (p.clip_count as number) ?? 0,
+        artifactPath: (p.artifact_path as string) ?? null,
         responsePreview: (p.response_preview as string) ?? "",
         inputTokens: (p.input_tokens as number) ?? null,
         outputTokens: (p.output_tokens as number) ?? null,
         costUsd: (p.cost_usd as number) ?? null,
         modelUsed: (p.model_used as string) ?? (p.model as string) ?? null,
         durationSeconds: (p.duration_seconds as number) ?? null,
-        framePaths: (p.frame_paths as string[]) ?? [],
-        clipId: (p.clip_id as string) ?? null,
       };
     });
 }

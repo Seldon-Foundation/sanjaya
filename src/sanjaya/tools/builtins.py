@@ -22,13 +22,14 @@ def make_context_tool(get_context_fn: Callable[[], Any]) -> Tool:
     )
 
 
-def make_llm_query_tool(llm_query_fn: Callable[[str], str]) -> Tool:
+def make_llm_query_tool(llm_query_fn: Callable[..., str]) -> Tool:
     """Create the `llm_query` tool for sub-LLM calls."""
     return Tool(
         name="llm_query",
         description=(
-            "Query a sub-LLM with a text prompt. Use this when you need "
-            "the LLM to analyze, summarize, or reason about data you've gathered."
+            "Query a sub-LLM. If you provide start_s/end_s on a video run, the "
+            "sub-LLM receives only that explicit video slice; otherwise this is "
+            "a text-only call."
         ),
         fn=llm_query_fn,
         parameters={
@@ -37,32 +38,45 @@ def make_llm_query_tool(llm_query_fn: Callable[[str], str]) -> Tool:
                 type_hint="str",
                 description="The text prompt to send to the sub-LLM.",
             ),
+            "start_s": ToolParam(
+                name="start_s",
+                type_hint="float | None",
+                default=None,
+                description="Optional absolute video start timestamp in seconds.",
+            ),
+            "end_s": ToolParam(
+                name="end_s",
+                type_hint="float | None",
+                default=None,
+                description="Optional absolute video end timestamp in seconds.",
+            ),
         },
         return_type="str",
     )
 
 
-def make_llm_query_batched_tool(llm_query_batched_fn: Callable[[list[str]], list[str]]) -> Tool:
+def make_llm_query_batched_tool(llm_query_batched_fn: Callable[[list[Any]], list[str]]) -> Tool:
     """Create the `llm_query_batched` tool for concurrent sub-LLM calls."""
     return Tool(
         name="llm_query_batched",
         description=(
-            "Run multiple LLM queries concurrently. Much faster than "
-            "sequential llm_query() calls for independent analyses."
+            "Run multiple sub-LLM queries concurrently. Each item can be a plain "
+            "prompt string or a dict with prompt/start_s/end_s for slice-scoped "
+            "video analysis."
         ),
         fn=llm_query_batched_fn,
         parameters={
-            "prompts": ToolParam(
-                name="prompts",
-                type_hint="list[str]",
-                description="List of text prompts to send concurrently.",
+            "queries": ToolParam(
+                name="queries",
+                type_hint="list[str | dict]",
+                description="List of prompt strings or dicts with prompt/start_s/end_s.",
             ),
         },
         return_type="list[str]",
     )
 
 
-def make_rlm_query_tool(rlm_query_fn: Callable[[str], str]) -> Tool:
+def make_rlm_query_tool(rlm_query_fn: Callable[..., str]) -> Tool:
     """Create the `rlm_query` tool for recursive sub-calls."""
     return Tool(
         name="rlm_query",
@@ -71,7 +85,8 @@ def make_rlm_query_tool(rlm_query_fn: Callable[[str], str]) -> Tool:
             "sandbox, can write code, use all available tools, and iterate "
             "independently until it solves the sub-problem. Use this when the "
             "subtask requires multi-step reasoning or its own exploration loop. "
-            "Falls back to llm_query at maximum recursion depth."
+            "If start_s/end_s are provided on a video run, the child is explicitly "
+            "scoped to that slice. Falls back to llm_query at maximum recursion depth."
         ),
         fn=rlm_query_fn,
         parameters={
@@ -80,26 +95,39 @@ def make_rlm_query_tool(rlm_query_fn: Callable[[str], str]) -> Tool:
                 type_hint="str",
                 description="The task/question for the child RLM to solve.",
             ),
+            "start_s": ToolParam(
+                name="start_s",
+                type_hint="float | None",
+                default=None,
+                description="Optional absolute video start timestamp in seconds.",
+            ),
+            "end_s": ToolParam(
+                name="end_s",
+                type_hint="float | None",
+                default=None,
+                description="Optional absolute video end timestamp in seconds.",
+            ),
         },
         return_type="str",
     )
 
 
-def make_rlm_query_batched_tool(rlm_query_batched_fn: Callable[[list[str]], list[str]]) -> Tool:
+def make_rlm_query_batched_tool(rlm_query_batched_fn: Callable[[list[Any]], list[str]]) -> Tool:
     """Create the `rlm_query_batched` tool for concurrent recursive sub-calls."""
     return Tool(
         name="rlm_query_batched",
         description=(
             "Run multiple recursive RLM sub-calls concurrently. Each child gets "
-            "a fresh REPL sandbox and iterates independently. Much faster than "
-            "sequential rlm_query() calls for independent sub-problems."
+            "a fresh REPL sandbox and iterates independently. Each item can be a "
+            "plain prompt string or a dict with prompt/start_s/end_s for "
+            "slice-scoped delegation."
         ),
         fn=rlm_query_batched_fn,
         parameters={
-            "prompts": ToolParam(
-                name="prompts",
-                type_hint="list[str]",
-                description="List of tasks/questions to solve concurrently.",
+            "queries": ToolParam(
+                name="queries",
+                type_hint="list[str | dict]",
+                description="List of prompt strings or dicts with prompt/start_s/end_s.",
             ),
         },
         return_type="list[str]",

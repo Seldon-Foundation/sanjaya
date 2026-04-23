@@ -54,7 +54,11 @@ def print_trace_summary(trace: dict[str, Any]) -> None:
     print(f"Run: {trace.get('run_id', '?')}")
     print(f"Question: {trace.get('question', '?')}")
     print(f"Answer: {str(trace.get('answer', '?'))[:200]}")
-    print(f"Model: {trace.get('model', '?')} | Vision: {trace.get('vision_model', '?')}")
+    print(
+        f"Model: {trace.get('model', '?')} | "
+        f"Vision: {trace.get('vision_model', '?')} | "
+        f"Audio: {trace.get('audio_model', '?')}"
+    )
     print(f"Iterations: {trace.get('iterations', '?')} | Wall time: {trace.get('wall_time_s', '?')}s")
 
     cost = trace.get("cost", {})
@@ -66,6 +70,11 @@ def print_trace_summary(trace: dict[str, Any]) -> None:
     events = trace.get("events", [])
     root_calls = [e for e in events if e.get("kind") == "sanjaya.root_llm_call_end"]
     regular_calls = [e for e in events if e.get("kind") == "sanjaya.sub_llm_call.regular_end"]
-    vision_calls = [e for e in events if e.get("kind") == "sanjaya.sub_llm_call.vision_end"]
-    print(f"LLM calls: {len(root_calls)} root + {len(regular_calls)} sub-regular + {len(vision_calls)} sub-vision")
+    video_calls = [e for e in events if e.get("kind") == "sanjaya.video_inspection_end"]
+    frame_calls = [e for e in events if e.get("kind") == "sanjaya.frame_inspection_end"]
+    audio_calls = [e for e in events if e.get("kind") == "sanjaya.audio_analysis_end"]
+    print(
+        f"LLM calls: {len(root_calls)} root + {len(regular_calls)} sub-regular + "
+        f"{len(video_calls)} video + {len(frame_calls)} frame + {len(audio_calls)} audio"
+    )
     print("---")

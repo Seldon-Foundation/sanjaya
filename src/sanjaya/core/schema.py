@@ -95,8 +95,8 @@ def default_schema() -> dict[str, Any]:
 
 _MODALITY_PROMPT = """\
 Given this question about a video, classify the primary evidence modality needed:
-- "transcript_primary": answer is mostly in what people say (quotes, summaries, \
-speaker attribution, dialogue analysis)
+- "transcript_primary": answer is mostly in spoken audio or transcription \
+(quotes, summaries, speaker attribution, dialogue analysis)
 - "vision_primary": answer requires looking at what's on screen (charts, products, \
 UI elements, diagrams, text overlays, physical objects, on-screen code)
 - "balanced": both transcript and visual evidence are equally important

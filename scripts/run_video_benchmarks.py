@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-"""Run video benchmarks with OpenAI models via OpenRouter.
+"""Run video benchmarks with the current Sanjaya agent defaults.
 
 Includes:
   - 12 original demo prompts (open-ended, 5 YouTube videos)
   - 9 LongVideoBench MCQ prompts (diverse categories, 9 YouTube videos)
 
-Root LLM:  openai/gpt-5.3-codex (OpenRouter)
-Sub LLM:   openai/gpt-4.1-mini (OpenRouter)
-Vision:    openai/gpt-4.1-mini (OpenRouter)
-Caption:   openai/gpt-4.1-mini (OpenRouter)
+Root, sub, and vision models inherit from the shared Agent defaults.
+Caption uses the shared caption default unless overridden in code.
 
 Uses multiprocessing (default 6 workers) to run prompts in parallel.
 
@@ -24,6 +22,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import subprocess
 import sys
@@ -32,24 +31,42 @@ import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
 # Ensure src is importable
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
+
+def _load_default_model_config() -> dict[str, str | None]:
+    try:
+        from sanjaya.model_defaults import get_default_model_config
+
+        return get_default_model_config()
+    except ModuleNotFoundError:
+        model_defaults_path = PROJECT_ROOT / "src" / "sanjaya" / "model_defaults.py"
+        spec = importlib.util.spec_from_file_location("sanjaya_model_defaults", model_defaults_path)
+        if spec is None or spec.loader is None:
+            raise
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.get_default_model_config()
+
+
+load_dotenv(PROJECT_ROOT / ".env", override=True)
 
 # ── Models ───────────────────────────────────────────────────
 
-ROOT_MODEL = "openrouter:openai/gpt-5.3-codex"
-SUB_MODEL = "openrouter:openai/gpt-4.1-mini"
-VISION_MODEL = "openrouter:openai/gpt-4.1-mini"
-CAPTION_MODEL = "openrouter:openai/gpt-4.1-mini"
+_DEFAULT_MODELS = _load_default_model_config()
+ROOT_MODEL = _DEFAULT_MODELS["root"]
+SUB_MODEL = _DEFAULT_MODELS["sub"]
+VISION_MODEL = _DEFAULT_MODELS["vision"]
+CAPTION_MODEL = _DEFAULT_MODELS["caption"]
 CRITIC_MODEL = None  # skip critic for benchmark runs
 
 # ── Paths ────────────────────────────────────────────────────
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA = PROJECT_ROOT / "data" / "youtube"
 LVB_DIR = PROJECT_ROOT / "data" / "longvideobench" / "videos"
 RESULTS_DIR = PROJECT_ROOT / "data" / "demo_results_codex53"
@@ -426,7 +443,7 @@ def _run_single_prompt(
             tracing=True,
         )
 
-        vt = VideoToolkit(max_frames_per_clip=8)
+        vt = VideoToolkit()
         agent.use(vt)
 
         answer = agent.ask(
@@ -586,7 +603,7 @@ def _extract_mcq_answer(raw_answer: str, answer_data: dict, candidates: list[str
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run video benchmarks (12 demo + 9 LVB MCQ) with Codex 5.3 + GPT-4.1-mini"
+        description="Run video benchmarks (12 demo + 9 LVB MCQ) with the current Sanjaya defaults"
     )
     parser.add_argument("--prompt", type=int, nargs="*", help="Prompt ID(s) to run (default: all 20)")
     parser.add_argument("--workers", type=int, default=6, help="Parallel workers (default: 6)")
@@ -634,7 +651,7 @@ def main():
             sys.exit(1)
         print(f"Continuing with {len(prompts_to_run)} prompts that have videos.\n")
 
-    run_name = args.run_name or f"codex53_{time.strftime('%Y%m%d_%H%M%S')}"
+    run_name = args.run_name or f"video_bench_{time.strftime('%Y%m%d_%H%M%S')}"
     results_dir = Path(args.output_dir) if args.output_dir else RESULTS_DIR
     run_dir = results_dir / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -657,7 +674,7 @@ def main():
     (run_dir / "config.json").write_text(json.dumps(run_config, indent=2), encoding="utf-8")
 
     print(f"\n{'=' * 70}")
-    print(f"Video Benchmark — Codex 5.3 + GPT-4.1-mini")
+    print("Video Benchmark")
     print(f"{'=' * 70}")
     print(f"  Run:          {run_name}")
     print(f"  Prompts:      {len(prompts_to_run)} ({n_demo} demo + {n_mcq} MCQ)")

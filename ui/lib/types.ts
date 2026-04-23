@@ -52,7 +52,22 @@ export interface SubLLMCall {
   durationSeconds: number | null;
 }
 
-/** Clip data from trace events. */
+/** Media operation data from trace events. */
+export interface MediaOperationEntry {
+  kind: "video_inspection" | "frame_inspection" | "audio_analysis";
+  startS: number;
+  endS: number;
+  prompt: string;
+  artifactPath: string | null;
+  responsePreview: string;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  costUsd: number | null;
+  modelUsed: string | null;
+  durationSeconds: number | null;
+}
+
+/** Legacy live-run clip entry kept for compatibility with older HUD panels. */
 export interface ClipEntry {
   clipId: string;
   startS: number;
@@ -61,7 +76,7 @@ export interface ClipEntry {
   frameCount: number;
 }
 
-/** Vision query entry. */
+/** Legacy vision entry kept for compatibility with older HUD panels. */
 export interface VisionEntry {
   prompt: string;
   frameCount: number;
@@ -153,9 +168,92 @@ export interface BenchmarkData {
     v1CostUsd: number;
     v1WallTimeS: number;
     latestVersion: string;
+    models?: string[];
   };
   liveRuns: LiveRunsData;
   videos: VideoInfo[];
+}
+
+export interface BenchmarkPromptCatalogItem {
+  prompt_id: number;
+  prompt_name: string;
+  video_key: string;
+  question: string;
+  is_mcq: boolean;
+  group: "demo" | "lvb";
+}
+
+export interface BenchmarkCatalog {
+  benchmark_type: "video";
+  prompts: BenchmarkPromptCatalogItem[];
+  defaults: {
+    workers: number;
+    max_iterations: number;
+    max_budget_usd: number;
+    fast: boolean;
+    download_lvb: boolean;
+    output_dir: string;
+    models: Record<string, string | null>;
+    prompt_presets: Record<"all" | "demo" | "lvb", number[]>;
+  };
+}
+
+export type BenchmarkJobStatus = "pending" | "running" | "stopping" | "complete" | "error" | "stopped";
+export type BenchmarkPromptJobStatus = "pending" | "running" | "complete" | "error" | "stopped";
+
+export interface BenchmarkJobPrompt {
+  prompt_id: number;
+  prompt_name: string;
+  video_key: string;
+  question: string;
+  is_mcq: boolean;
+  group: "demo" | "lvb";
+  status: BenchmarkPromptJobStatus;
+  started_at: number | null;
+  finished_at: number | null;
+  run_id: string | null;
+  result_path: string | null;
+  trace_path: string | null;
+  trace_event_count: number;
+  iterations: number | null;
+  cost_usd: number | null;
+  wall_time_s: number | null;
+  error: string | null;
+  mcq_correct: boolean | null;
+}
+
+export interface BenchmarkJobSummary {
+  job_id: string;
+  benchmark_type: "video";
+  status: BenchmarkJobStatus;
+  created_at: number;
+  started_at: number | null;
+  finished_at: number | null;
+  stop_requested_at: number | null;
+  stop_reason: string | null;
+  run_name: string;
+  output_dir: string;
+  models: Record<string, string | null>;
+  workers: number;
+  max_iterations: number;
+  max_budget_usd: number;
+  fast: boolean;
+  download_lvb: boolean;
+  total_prompts: number;
+  completed_prompts: number;
+  error_prompts: number;
+  active_prompt_ids: number[];
+  prompt_ids: number[];
+  prompts: BenchmarkJobPrompt[];
+  stdout_tail: string[];
+  stderr_tail: string[];
+  revision: number;
+}
+
+export interface BenchmarkPromptTraceResponse {
+  prompt_id: number;
+  run_id: string | null;
+  events: TraceEvent[];
 }
 
 /* ── Document benchmark types ─────────────────────────── */

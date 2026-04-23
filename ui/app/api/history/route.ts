@@ -1,6 +1,7 @@
 import { readdir, readFile } from "fs/promises";
-import { join, basename } from "path";
+import { join } from "path";
 import { NextResponse } from "next/server";
+import { normalizeTraceEvents } from "@/lib/trace-events";
 
 const DATA_DIR = join(process.cwd(), "..", "data");
 
@@ -44,7 +45,7 @@ async function scanArtifacts(dir: string): Promise<HistoryEntry[]> {
         const raw = await readFile(manifestPath, "utf-8");
         const manifest = JSON.parse(raw);
         const events: Array<{ kind: string; timestamp: number; payload: Record<string, unknown> }> =
-          manifest.trace_events ?? [];
+          normalizeTraceEvents(manifest.trace_events ?? []);
 
         const runStart = events.find((e) => e.kind === "run_start");
         const runEnd = events.find((e) => e.kind === "run_end");

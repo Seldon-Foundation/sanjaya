@@ -8,12 +8,12 @@ MONTY_HINTS: dict[str, str] = {
     "ModuleNotFoundError": (
         "This module is not available in the sandboxed REPL. "
         "Use the provided tools for external operations: "
-        "get_video_info() for metadata, extract_clip() for media, "
+        "inspect_video() / analyze_audio() for video media, "
         "save_note() for file output, llm_query() for LLM calls."
     ),
     "FileNotFoundError": (
         "Direct file access is not available. Use the provided tools: "
-        "get_video_info(), extract_clip(), sample_frames(), save_note()."
+        "inspect_video(), analyze_audio(), get_state(), save_note()."
     ),
     "PermissionError": (
         "The REPL is sandboxed. Use save_note() or save_data() to write files."

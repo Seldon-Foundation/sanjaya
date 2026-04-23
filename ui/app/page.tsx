@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { BenchmarkData } from "@/lib/types";
 import { fetchBenchmarks } from "@/lib/api";
+import { BenchmarkLauncher } from "@/components/benchmark/benchmark-launcher";
 import { SummaryHeader } from "@/components/benchmark/summary-header";
 import { OverviewTable } from "@/components/benchmark/overview-table";
 import { LiveRunHistory } from "@/components/benchmark/live-run-history";
@@ -11,11 +12,18 @@ export default function BenchmarkDashboard() {
   const [data, setData] = useState<BenchmarkData | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const loadBenchmarks = useCallback(() => {
     fetchBenchmarks()
-      .then(setData)
+      .then((nextData) => {
+        setData(nextData);
+        setError(null);
+      })
       .catch((e) => setError(e.message));
   }, []);
+
+  useEffect(() => {
+    loadBenchmarks();
+  }, [loadBenchmarks]);
 
   if (error) {
     return (
@@ -38,9 +46,10 @@ export default function BenchmarkDashboard() {
   }
 
   return (
-    <div className="flex min-h-screen flex-col">
+    <div className="flex min-h-screen min-w-0 flex-col">
       <SummaryHeader data={data} />
-      <div className="flex-1 p-4 space-y-4">
+      <div className="flex-1 min-w-0 space-y-4 p-4">
+        <BenchmarkLauncher onResultsChanged={loadBenchmarks} />
         <OverviewTable prompts={data.prompts} latestVersion={data.summary.latestVersion} />
         <LiveRunHistory data={data.liveRuns} videos={data.videos} />
       </div>

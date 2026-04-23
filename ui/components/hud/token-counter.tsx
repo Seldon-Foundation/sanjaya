@@ -22,7 +22,7 @@ function formatCost(n: number): string {
 function deriveBreakdown(events: TraceEvent[]) {
   let orchestratorTokens = 0;
   let subLLMTokens = 0;
-  let visionTokens = 0;
+  let mediaTokens = 0;
 
   for (const e of events) {
     const p = e.payload;
@@ -30,10 +30,12 @@ function deriveBreakdown(events: TraceEvent[]) {
     const total = ((p.input_tokens as number) ?? 0) + ((p.output_tokens as number) ?? 0);
     if (e.kind === "root_response") orchestratorTokens += total;
     if (e.kind === "sub_llm") subLLMTokens += total;
-    if (e.kind === "vision") visionTokens += total;
+    if (e.kind === "video_inspection" || e.kind === "frame_inspection" || e.kind === "audio_analysis") {
+      mediaTokens += total;
+    }
   }
 
-  return { orchestratorTokens, subLLMTokens, visionTokens };
+  return { orchestratorTokens, subLLMTokens, mediaTokens };
 }
 
 export function TokenCounter({ totals, events, isRunning }: TokenCounterProps) {
@@ -76,8 +78,8 @@ export function TokenCounter({ totals, events, isRunning }: TokenCounterProps) {
               value={formatNumber(breakdown.subLLMTokens)}
             />
             <DataRow
-              label="VISION"
-              value={formatNumber(breakdown.visionTokens)}
+              label="MEDIA"
+              value={formatNumber(breakdown.mediaTokens)}
             />
           </>
         )}

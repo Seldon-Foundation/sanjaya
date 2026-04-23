@@ -1,6 +1,7 @@
 import { readdir, readFile } from "fs/promises";
 import { join } from "path";
 import { NextResponse } from "next/server";
+import { normalizeTraceEvents } from "@/lib/trace-events";
 
 const DATA_DIR = join(process.cwd(), "..", "data");
 
@@ -256,42 +257,27 @@ interface RawResult {
     subtitle_generated: boolean;
     subtitle_source: string;
   };
+  config?: {
+    root_model?: string;
+    sub_model?: string;
+    vision_model?: string;
+    caption_model?: string | null;
+    critic_model?: string | null;
+  };
   error?: string;
   trace_events?: TraceEvent[];
 }
 
-/** Map internal tracer span names to frontend event names. */
-const KIND_MAP: Record<string, string> = {
-  "sanjaya.completion_start": "run_start",
-  "sanjaya.completion_end": "run_end",
-  "sanjaya.iteration_start": "iteration_start",
-  "sanjaya.iteration_end": "iteration_end",
-  "sanjaya.root_llm_call_start": "root_response_start",
-  "sanjaya.root_llm_call_end": "root_response",
-  "sanjaya.code_execution_start": "code_instruction",
-  "sanjaya.code_execution_end": "code_execution",
-  "sanjaya.tool_call_start": "tool_call_start",
-  "sanjaya.tool_call_end": "tool_call",
-  "sanjaya.sub_llm_call.regular_start": "sub_llm_start",
-  "sanjaya.sub_llm_call.regular_end": "sub_llm",
-  "sanjaya.sub_llm_call.vision_start": "vision_start",
-  "sanjaya.sub_llm_call.vision_end": "vision",
-  "sanjaya.sub_llm_call.caption_frames_start": "vision_start",
-  "sanjaya.sub_llm_call.caption_frames_end": "vision",
-  "sanjaya.schema_generation_start": "schema_generation_start",
-  "sanjaya.schema_generation_end": "schema_generation",
-  "sanjaya.critic_evaluation": "critic_evaluation",
-};
-
-function normalizeTraceEvents(events: TraceEvent[]): Array<{ kind: string; timestamp: number; payload: Record<string, unknown> }> {
-  return events.map((e) => {
-    const { kind: rawKind, timestamp, ...payload } = e;
-    return {
-      kind: KIND_MAP[rawKind] ?? rawKind,
-      timestamp,
-      payload,
-    };
-  });
+function extractModelLabels(raw: RawResult): string[] {
+  const config = raw.config;
+  if (!config) return [];
+  return Array.from(new Set([
+    config.root_model,
+    config.sub_model,
+    config.vision_model,
+    config.caption_model,
+    config.critic_model,
+  ].filter((value): value is string => typeof value === "string" && value.length > 0)));
 }
 
 function toCamelCase(raw: RawResult) {
@@ -316,6 +302,7 @@ function toCamelCase(raw: RawResult) {
           subtitleSource: raw.subtitle.subtitle_source,
         }
       : { hadExistingSubtitle: false, subtitleGenerated: false, subtitleSource: "none" },
+    models: extractModelLabels(raw),
     error: raw.error,
     traceEvents: raw.trace_events ? normalizeTraceEvents(raw.trace_events) : null,
   };
@@ -464,7 +451,7 @@ async function loadLvbDejavuArtifactPrompts(): Promise<Array<{ version: string; 
       continue;
     }
 
-    const traceEvents = manifest.trace_events ?? [];
+    const traceEvents = normalizeTraceEvents(manifest.trace_events ?? []);
     if (!Array.isArray(traceEvents) || traceEvents.length === 0) continue;
 
     const runStart = traceEvents.find((e) => typeof (e.payload as Record<string, unknown> | undefined)?.video_path === "string");
@@ -867,9 +854,14 @@ export async function GET() {
   let v1CostUsd = 0;
   let v1WallTimeS = 0;
   const versionSet = new Set<string>();
+  const modelSet = new Set<string>();
   for (const p of prompts) {
     for (const [v, data] of Object.entries(p.versions)) {
       versionSet.add(v);
+      const models = (data as { models?: string[] }).models ?? [];
+      for (const model of models) {
+        modelSet.add(model);
+      }
       if (v === p.bestVersion) {
         bestCostUsd += data.costUsd;
         bestWallTimeS += data.wallTimeS;
@@ -927,6 +919,7 @@ export async function GET() {
       v1CostUsd: Math.round(v1CostUsd * 10000) / 10000,
       v1WallTimeS: Math.round(v1WallTimeS * 10) / 10,
       latestVersion,
+      models: Array.from(modelSet),
     },
     liveRuns: {
       runs: liveRunItems,

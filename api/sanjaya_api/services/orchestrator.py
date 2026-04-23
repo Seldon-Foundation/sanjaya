@@ -41,8 +41,6 @@ class OrchestratorService:
         video_path: str,
         question: str,
         subtitle_path: str | None = None,
-        subtitle_mode: str = "none",
-        subtitle_api_model: str = "gpt-4o-transcribe-diarize",
         max_iterations: int = 20,
     ) -> str:
         """Start a new video orchestration run in a background thread, return run_id."""
@@ -54,7 +52,7 @@ class OrchestratorService:
 
         thread = threading.Thread(
             target=self._run_completion,
-            args=(record, video_path, question, subtitle_path, subtitle_mode, max_iterations),
+            args=(record, video_path, question, subtitle_path, max_iterations),
             daemon=True,
         )
         record.thread = thread
@@ -80,7 +78,6 @@ class OrchestratorService:
         video_path: str,
         question: str,
         subtitle_path: str | None,
-        subtitle_mode: str,
         max_iterations: int,
     ) -> None:
         """Execute Agent.ask() in a background thread."""
@@ -92,7 +89,7 @@ class OrchestratorService:
         try:
             agent = Agent(max_iterations=max_iterations, tracing=True)
             agent._tracer = tracer
-            agent.use(VideoToolkit(subtitle_mode=subtitle_mode))
+            agent.use(VideoToolkit())
 
             resolved_video = self._resolve_video_path(video_path)
             answer = agent.ask(

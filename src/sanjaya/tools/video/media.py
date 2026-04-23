@@ -1,4 +1,4 @@
-"""Media helpers for probing videos, extracting clips, and sampling frames.
+"""Media helpers for probing videos, extracting clips, frames, and audio.
 
 Ported from video_tools/media.py — same ffmpeg/ffprobe logic.
 """
@@ -30,7 +30,7 @@ def ffprobe_metadata(video_path: str) -> dict:
 
     cmd = [
         "ffprobe", "-v", "error",
-        "-show_entries", "format=duration,filename,size:stream=index,codec_type,width,height,r_frame_rate",
+        "-show_entries", "format=duration,filename,format_name,size:stream=index,codec_type,codec_name,width,height,r_frame_rate",
         "-of", "json", str(path),
     ]
     result = subprocess.run(cmd, check=False, capture_output=True, text=True)
@@ -59,12 +59,25 @@ def get_video_info(video_path: str) -> dict:
     streams = meta.get("streams", [])
 
     video_stream = next((s for s in streams if s.get("codec_type") == "video"), {})
+    frame_rate = video_stream.get("r_frame_rate")
+    fps: float | None = None
+    if isinstance(frame_rate, str) and frame_rate:
+        try:
+            num_str, denom_str = frame_rate.split("/", 1)
+            num = float(num_str)
+            denom = float(denom_str)
+            if denom:
+                fps = round(num / denom, 3)
+        except (TypeError, ValueError, ZeroDivisionError):
+            fps = None
 
     return {
         "duration_s": float(fmt.get("duration", 0)),
         "width": int(video_stream.get("width", 0)),
         "height": int(video_stream.get("height", 0)),
-        "codec": video_stream.get("codec_type", "unknown"),
+        "codec": video_stream.get("codec_name") or video_stream.get("codec_type", "unknown"),
+        "fps": fps,
+        "container": fmt.get("format_name", "unknown"),
         "file_size_mb": round(int(fmt.get("size", 0)) / (1024 * 1024), 2),
     }
 
@@ -92,6 +105,59 @@ def extract_clip(video_path: str, start_s: float, end_s: float, output_path: str
     result = subprocess.run(cmd, check=False, capture_output=True, text=True)
     if result.returncode != 0:
         raise MediaToolError(result.stderr.strip() or "ffmpeg clip extraction failed")
+    return str(dst)
+
+
+def extract_frame(video_path: str, at_s: float, output_path: str) -> str:
+    """Extract a single frame at an absolute timestamp."""
+    _require_binary("ffmpeg")
+    at_s = max(0.0, float(at_s))
+
+    src = Path(video_path)
+    dst = Path(output_path)
+    if not src.exists():
+        raise FileNotFoundError(f"Video not found: {src}")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", f"{at_s:.3f}",
+        "-i", str(src),
+        "-frames:v", "1",
+        "-q:v", "2",
+        str(dst),
+    ]
+    result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise MediaToolError(result.stderr.strip() or "ffmpeg frame extraction failed")
+    return str(dst)
+
+
+def extract_audio(video_path: str, start_s: float, end_s: float, output_path: str) -> str:
+    """Extract mono 16kHz WAV audio for a slice."""
+    _require_binary("ffmpeg")
+    start_s = max(0.0, float(start_s))
+    end_s = max(start_s + 0.1, float(end_s))
+
+    src = Path(video_path)
+    dst = Path(output_path)
+    if not src.exists():
+        raise FileNotFoundError(f"Video not found: {src}")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", f"{start_s:.3f}", "-to", f"{end_s:.3f}",
+        "-i", str(src),
+        "-vn",
+        "-ac", "1",
+        "-ar", "16000",
+        "-c:a", "pcm_s16le",
+        str(dst),
+    ]
+    result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise MediaToolError(result.stderr.strip() or "ffmpeg audio extraction failed")
     return str(dst)
 
 

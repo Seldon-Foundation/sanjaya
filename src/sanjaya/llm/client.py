@@ -1,4 +1,4 @@
-"""Unified LLM client with text, vision, and batched support.
+"""Unified LLM client with text, image, video, audio, and batched support.
 
 Merges the old LLMClient (text-only) and VideoLLMClient (text + vision)
 into a single class. Adds concurrent batched completions.
@@ -12,6 +12,7 @@ registry and the corresponding environment variables.
 from __future__ import annotations
 
 import asyncio
+import mimetypes
 import threading
 import time
 from pathlib import Path
@@ -89,7 +90,7 @@ def _compute_cost(model_name: str, input_tokens: int, output_tokens: int) -> flo
                 candidates.append(stripped)
 
         for ref in candidates:
-            for provider_id in ("openrouter", "openai", "anthropic"):
+            for provider_id in ("openrouter", "openai", "anthropic", "google", "google-vertex", "vertex_ai"):
                 try:
                     result = calc_price(usage, model_ref=ref, provider_id=provider_id)
                     return float(result.total_price)
@@ -125,6 +126,7 @@ class LLMClient:
 
         self.last_usage: UsageSnapshot | None = None
         self.last_call_metadata: CallMetadata | None = None
+        self._media_binary_cache: dict[str, bytes] = {}
 
         # Moondream direct client (bypasses pydantic-ai for vision)
         self._moondream: Any = None
@@ -220,6 +222,36 @@ class LLMClient:
                     q.get("frame_paths"),
                     q.get("clip_paths"),
                 ),
+                "timeout": timeout,
+            }
+            for q in queries
+        ])
+
+    def media_completion(
+        self,
+        *,
+        prompt: str,
+        media: list[dict[str, Any]],
+        model: ModelSpec | None = None,
+        timeout: int = 300,
+    ) -> str:
+        """Single native multimodal completion with explicit attachments."""
+        payload = self._build_media_content(prompt, media)
+        return self._call(model or self.vision_model, payload, timeout=timeout)
+
+    def media_completion_batched(
+        self,
+        queries: list[dict[str, Any]],
+        *,
+        model: ModelSpec | None = None,
+        timeout: int = 300,
+    ) -> list[str]:
+        """Concurrent multimodal completions with explicit attachments."""
+        target_model = model or self.vision_model
+        return self._run_batched([
+            {
+                "model": target_model,
+                "payload": self._build_media_content(q["prompt"], q.get("media", [])),
                 "timeout": timeout,
             }
             for q in queries
@@ -336,6 +368,70 @@ class LLMClient:
             user_content.append("No visual attachments were available.")
 
         return user_content
+
+    def _build_media_content(
+        self,
+        prompt: str,
+        media: list[dict[str, Any]],
+    ) -> list[Any]:
+        """Build multimodal content with explicit local media attachments."""
+        user_content: list[Any] = [prompt]
+
+        for item in media:
+            attachment = item.get("content")
+            if isinstance(attachment, BinaryContent):
+                user_content.append(attachment)
+                continue
+
+            path_value = item.get("path")
+            if not path_value:
+                continue
+            path = Path(str(path_value))
+            if not path.exists():
+                continue
+
+            media_type = str(item.get("media_type") or self._guess_media_type(path))
+            cache_key = f"{path.resolve()}::{media_type}"
+            data = self._media_binary_cache.get(cache_key)
+            if data is None:
+                if media_type.startswith("image/"):
+                    data = _compress_frame(path, max_dim=1536, quality=85)
+                else:
+                    data = path.read_bytes()
+                self._media_binary_cache[cache_key] = data
+
+            user_content.append(
+                BinaryContent(
+                    data=data,
+                    media_type=media_type,
+                    vendor_metadata=item.get("vendor_metadata"),
+                )
+            )
+
+        if len(user_content) == 1:
+            user_content.append("No media attachments were available.")
+
+        return user_content
+
+    def _guess_media_type(self, path: Path) -> str:
+        guessed, _ = mimetypes.guess_type(str(path))
+        if guessed:
+            return guessed
+
+        suffix = path.suffix.lower()
+        if suffix in {".jpg", ".jpeg"}:
+            return "image/jpeg"
+        if suffix == ".png":
+            return "image/png"
+        if suffix in {".mp4", ".m4v"}:
+            return "video/mp4"
+        if suffix == ".mov":
+            return "video/quicktime"
+        if suffix == ".wav":
+            return "audio/wav"
+        if suffix == ".mp3":
+            return "audio/mpeg"
+        return "application/octet-stream"
 
     def _run_agent(self, model: ModelSpec, payload: Any, timeout: int = 300) -> tuple[str, Any]:
         model_label = model if isinstance(model, str) else getattr(model, "model_name", "unknown")

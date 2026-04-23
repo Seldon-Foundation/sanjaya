@@ -14,40 +14,26 @@ interface FinalAnswerPanelProps {
 }
 
 function deriveEvidence(events: TraceEvent[]) {
-  // Extract evidence from clip events (windows that were investigated)
   const evidence: Array<{
-    clipId: string;
+    label: string;
     startS: number;
     endS: number;
-    visionSummary: string | null;
+    summary: string | null;
   }> = [];
 
-  const clipMap = new Map<string, { startS: number; endS: number }>();
   for (const e of events) {
-    if (e.kind === "clip") {
-      clipMap.set(e.payload.clip_id as string, {
+    if (e.kind === "video_inspection" || e.kind === "frame_inspection" || e.kind === "audio_analysis") {
+      evidence.push({
+        label: e.kind.replaceAll("_", " "),
         startS: (e.payload.start_s as number) ?? 0,
         endS: (e.payload.end_s as number) ?? 0,
+        summary:
+          (e.payload.response_preview as string) ??
+          (e.payload.audio_summary as string) ??
+          null,
       });
     }
   }
-
-  // Match vision queries to clips
-  const visionEvents = events.filter((e) => e.kind === "vision");
-  for (const [clipId, clip] of clipMap) {
-    const vision = visionEvents.find(
-      (v) => ((v.payload.prompt as string) ?? "").includes(clip.startS.toString())
-    );
-    evidence.push({
-      clipId,
-      startS: clip.startS,
-      endS: clip.endS,
-      visionSummary: vision
-        ? (vision.payload.response_preview as string) ?? null
-        : null,
-    });
-  }
-
   return evidence;
 }
 
@@ -161,17 +147,17 @@ export function FinalAnswerPanel({
             <div className="space-y-0">
               {/* Header */}
               <div className="grid grid-cols-[1fr_60px_60px_2fr] gap-2 text-[13px] text-hud-dim uppercase tracking-wider border-b border-hud-border pb-1 mb-1">
-                <span>WINDOW</span>
+                <span>OPERATION</span>
                 <span className="text-right">START</span>
                 <span className="text-right">END</span>
                 <span>SUMMARY</span>
               </div>
               {evidence.map((e) => (
                 <div
-                  key={e.clipId}
+                  key={`${e.label}-${e.startS}-${e.endS}`}
                   className="grid grid-cols-[1fr_60px_60px_2fr] gap-2 text-[12px] py-0.5"
                 >
-                  <span className="text-foreground truncate">{e.clipId}</span>
+                  <span className="text-foreground truncate">{e.label}</span>
                   <span className="text-right tabular-nums text-hud-dim">
                     {e.startS.toFixed(1)}s
                   </span>
@@ -179,7 +165,7 @@ export function FinalAnswerPanel({
                     {e.endS.toFixed(1)}s
                   </span>
                   <span className="text-hud-dim truncate">
-                    {e.visionSummary ?? "—"}
+                    {e.summary ?? "—"}
                   </span>
                 </div>
               ))}

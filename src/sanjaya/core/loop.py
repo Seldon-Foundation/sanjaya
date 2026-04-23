@@ -37,29 +37,39 @@ class LoopResult:
     wall_time_s: float
 
 
-_VISION_TOOLS = {"vision_query", "vision_query_batched", "caption_frames"}
+_MEDIA_TOOLS = {"inspect_video", "analyze_audio"}
 _DONE_SUPPRESSION_LIMIT = 1
 _STUCK_WINDOW = 3
 _STUCK_MAX_TRIGGERS = 2
 
 
-def _has_vision_tools(repl: AgentREPL) -> bool:
-    """Check if video/vision tools are registered."""
-    return bool(_VISION_TOOLS & {t.name for t in repl.registry.all_tools()})
+def _has_media_tools(repl: AgentREPL) -> bool:
+    """Check if native video/audio tools are registered."""
+    return bool(_MEDIA_TOOLS & {t.name for t in repl.registry.all_tools()})
 
 
-def _vision_analysis_done(messages: list[dict[str, str]]) -> bool:
-    """Check if a vision tool has been called in any previous execution feedback."""
-    for msg in messages:
-        if msg.get("role") != "user":
+def _media_analysis_done(repl: AgentREPL, messages: list[dict[str, str]]) -> bool:
+    """Check whether the agent has grounded its answer in native media."""
+    for toolkit in repl.registry.toolkits:
+        if not hasattr(toolkit, "get_state"):
             continue
+        try:
+            state = toolkit.get_state()
+        except Exception:
+            continue
+        if state.get("recent_inspected_spans") or state.get("recent_audio_spans"):
+            return True
+
+    for msg in messages:
         content = msg.get("content", "")
         if (
-            "vision_query(" in content
-            or "vision_query_batched(" in content
-            or "caption_frames(" in content
+            "inspect_video(" in content
+            or "analyze_audio(" in content
+            or ("llm_query(" in content and "start_s" in content and "end_s" in content)
         ):
             return True
+        if msg.get("role") != "user":
+            continue
     return False
 
 
@@ -106,10 +116,13 @@ def _run_iteration(
     critic: Any | None = None,
     answer_schema: dict[str, Any] | None = None,
     critic_prompt: str | None = None,
+    trace_context: dict[str, Any] | None = None,
 ) -> LoopResult | None:
     """Run a single iteration, wrapped in tracer spans. Returns LoopResult if done."""
 
-    with tracer.iteration(iteration=iteration + 1) if tracer else _nullctx() as iter_trace:
+    trace_context = trace_context or {}
+
+    with tracer.iteration(iteration=iteration + 1, **trace_context) if tracer else _nullctx() as iter_trace:
         # Build orchestrator prompt
         orchestrator_messages = messages + [next_action_prompt(question, iteration, max_iterations=config.max_iterations)]
         prompt = "\n\n".join(m.get("content", "") for m in orchestrator_messages)
@@ -117,7 +130,7 @@ def _run_iteration(
         # Call orchestrator LLM
         _console.print("[dim]Querying root LLM...[/]")
 
-        with tracer.orchestrator_call(model=model_name) if tracer else _nullctx() as orch_trace:
+        with tracer.orchestrator_call(model=model_name, **trace_context) if tracer else _nullctx() as orch_trace:
             response = orchestrator.completion(prompt)
 
             if orch_trace:
@@ -155,7 +168,7 @@ def _run_iteration(
                 # Detect which tools are called in this code block
                 tools_used = [name for name in tool_names if name + "(" in code]
 
-                with tracer.code_execution(code=code, block_index=idx) if tracer else _nullctx() as exec_trace:
+                with tracer.code_execution(code=code, block_index=idx, **trace_context) if tracer else _nullctx() as exec_trace:
                     last_result = repl.execute(
                         code,
                         iteration=iteration + 1,
@@ -218,26 +231,24 @@ def _run_iteration(
             # Check for final answer
             final_answer = extract_final_answer(last_result, response)
             if final_answer is not None:
-                # Guard: if vision tools are registered but haven't been used yet,
-                # suppress done() and nudge the orchestrator to do visual analysis.
+                # Guard: if native media tools are registered but haven't been used yet,
+                # suppress done() and nudge the orchestrator to ground on slices first.
                 if (
-                    _has_vision_tools(repl)
-                    and not _vision_analysis_done(messages)
+                    _has_media_tools(repl)
+                    and not _media_analysis_done(repl, messages)
                     and done_suppression_count < _DONE_SUPPRESSION_LIMIT
                 ):
                     _console.print(
-                        "[yellow]⚠️  done() called without visual analysis — "
-                        "suppressing, nudging agent to use vision tools[/]"
+                        "[yellow]⚠️  done() called without native media grounding — "
+                        "suppressing, nudging agent to inspect slices first[/]"
                     )
                     messages.append({
                         "role": "user",
                         "content": (
-                            "You called done() without performing visual analysis. "
-                            "The transcript alone is not sufficient. "
-                            "Please extract clips with extract_clip(), sample frames with "
-                            "sample_frames(), and analyze them with caption_frames() or "
-                            "vision_query() before calling done(). "
-                            "Review the Video Analysis Strategy steps."
+                            "You called done() without grounding the answer in native media analysis. "
+                            "Use `inspect_video()` and/or `analyze_audio()` on short, relevant slices "
+                            "before calling done(). Avoid context rot by splitting broad spans into "
+                            "smaller chunks, then synthesize from those observations."
                         ),
                     })
                     # Signal to the loop that we suppressed done()
@@ -263,7 +274,7 @@ def _run_iteration(
                     _console.print(f"[dim]Critic score: {score}/100[/]")
 
                     if tracer:
-                        tracer.emit("sanjaya.critic_evaluation", **eval_result)
+                        tracer.emit("sanjaya.critic_evaluation", **trace_context, **eval_result)
 
                     if not eval_result["pass"]:
                         gaps = eval_result.get("gaps", [])
@@ -349,6 +360,7 @@ def run_loop(
     critic: Any | None = None,
     answer_schema: dict[str, Any] | None = None,
     critic_prompt: str | None = None,
+    trace_context: dict[str, Any] | None = None,
 ) -> LoopResult:
     """The RLM iteration loop.
 
@@ -402,6 +414,7 @@ def run_loop(
             critic=critic,
             answer_schema=answer_schema,
             critic_prompt=critic_prompt,
+            trace_context=trace_context,
         )
         if result is not None:
             return result
@@ -409,7 +422,7 @@ def run_loop(
         # Track if done() was suppressed this iteration (message was appended)
         if (
             messages
-            and "You called done() without performing visual analysis" in messages[-1].get("content", "")
+            and "You called done() without grounding the answer in native media analysis" in messages[-1].get("content", "")
         ):
             done_suppression_count += 1
 
@@ -433,9 +446,9 @@ def run_loop(
                         "content": (
                             "You appear to be stuck — the last few attempts scored "
                             "similarly and you haven't explored new video regions. "
-                            "CHANGE YOUR APPROACH: try different search queries, "
-                            "look at different parts of the video, or use vision_query "
-                            "on unexplored regions. If you've exhausted available "
+                            "CHANGE YOUR APPROACH: inspect different short slices, "
+                            "analyze audio on another segment, or delegate smaller "
+                            "video spans to llm_query/rlm_query. If you've exhausted available "
                             "evidence, call done() with your best answer noting "
                             "what you couldn't verify."
                         ),

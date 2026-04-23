@@ -69,9 +69,19 @@ export function RunDetailModal({ runId, onClose }: RunDetailModalProps) {
   // Frames grouped by clip
   const allFrames: { clipId: string; startS: number; endS: number; paths: string[] }[] = [];
   if (manifest) {
-    for (const [clipId, clip] of Object.entries(manifest.clips)) {
+    for (const [clipId, clip] of Object.entries(manifest.clips ?? {})) {
       if (clip.frame_paths?.length) {
         allFrames.push({ clipId, startS: clip.start_s, endS: clip.end_s, paths: clip.frame_paths });
+      }
+    }
+    for (const op of manifest.media_operations ?? []) {
+      if (op.kind === "frame" && op.artifact_path) {
+        allFrames.push({
+          clipId: "frame",
+          startS: op.start_s,
+          endS: op.end_s,
+          paths: [op.artifact_path],
+        });
       }
     }
     allFrames.sort((a, b) => a.startS - b.startS);
@@ -237,6 +247,9 @@ const KIND_COLORS: Record<string, string> = {
   clip: "text-cyan-400",
   frames: "text-cyan-400",
   vision: "text-purple-400",
+  video_inspection: "text-purple-400",
+  frame_inspection: "text-cyan-400",
+  audio_analysis: "text-hud-label",
   sub_llm: "text-hud-dim",
   transcription: "text-hud-dim",
 };
@@ -258,13 +271,18 @@ function TraceRow({ event, relS }: { event: RunManifest["trace_events"][0]; relS
       case "clip": summary = `${p.clip_id ?? "?"} [${(p.start_s as number)?.toFixed(0) ?? "?"}–${(p.end_s as number)?.toFixed(0) ?? "?"}s]`; break;
       case "frames": summary = `${p.clip_id ?? "?"} → ${p.frame_count ?? 0}f`; break;
       case "vision": summary = `${p.frame_count ?? 0}f ${(p.duration_seconds as number)?.toFixed(1) ?? "?"}s`; break;
+      case "video_inspection":
+      case "frame_inspection":
+      case "audio_analysis":
+        summary = `[${(p.start_s as number)?.toFixed(0) ?? "?"}–${(p.end_s as number)?.toFixed(0) ?? "?"}s]`;
+        break;
       case "sub_llm": summary = ((p.prompt_preview as string) ?? "").slice(0, 50); break;
       case "transcription": summary = `source=${p.source ?? "?"}${p.error ? ` err` : ""}`; break;
       default: summary = ""; break;
     }
   } catch { summary = ""; }
 
-  const expandable = ["code_execution", "code_instruction", "vision", "sub_llm", "run_end"].includes(event.kind);
+  const expandable = ["code_execution", "code_instruction", "vision", "video_inspection", "frame_inspection", "audio_analysis", "sub_llm", "run_end"].includes(event.kind);
 
   return (
     <div className="border-b border-hud-border/20 last:border-0">
@@ -287,6 +305,14 @@ function TraceRow({ event, relS }: { event: RunManifest["trace_events"][0]; relS
             <>
               <p className="text-foreground/50 mb-1">{(p.prompt as string) ?? "—"}</p>
               <p className="text-foreground/80 whitespace-pre-wrap">{(p.response_preview as string) ?? "—"}</p>
+            </>
+          )}
+          {(event.kind === "video_inspection" || event.kind === "frame_inspection" || event.kind === "audio_analysis") && (
+            <>
+              <p className="text-foreground/50 mb-1">{(p.prompt as string) ?? "—"}</p>
+              <p className="text-foreground/80 whitespace-pre-wrap">
+                {(p.response_preview as string) ?? (p.audio_summary as string) ?? "—"}
+              </p>
             </>
           )}
           {event.kind === "sub_llm" && (

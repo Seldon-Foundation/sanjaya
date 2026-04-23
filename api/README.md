@@ -1,6 +1,6 @@
 # Sanjaya API — Backend
 
-FastAPI bridge wrapping `VideoRLM_REPL` for the Sanjaya HUD dashboard. Runs orchestrations in background threads and streams trace events via SSE.
+FastAPI bridge wrapping the unified `Agent` for the Sanjaya HUD dashboard. Runs orchestrations in background threads and streams trace events via SSE.
 
 ## Setup
 
@@ -18,7 +18,10 @@ Inherits from parent project `.env`:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `OPENROUTER_API_KEY` | Yes | Primary LLM provider |
+| `GOOGLE_API_KEY` | Recommended | Gemini / Vertex provider key |
+| `GOOGLE_CLOUD_PROJECT` | Recommended | Vertex project id |
+| `GOOGLE_CLOUD_LOCATION` | Optional | Vertex location (`global` by default) |
+| `OPENROUTER_API_KEY` | Optional | Alternate provider for non-video models |
 | `OPENAI_API_KEY` | Optional | OpenAI provider |
 | `ANTHROPIC_API_KEY` | Optional | Anthropic provider |
 | `LOGFIRE_TOKEN` | Optional | Observability |
@@ -39,8 +42,7 @@ Start a new VideoRLM orchestration run.
 {
   "video_path": "/path/to/video.mp4",
   "question": "What is happening in the video?",
-  "subtitle_path": null,
-  "subtitle_mode": "auto"
+  "subtitle_path": null
 }
 ```
 
@@ -52,7 +54,7 @@ Start a new VideoRLM orchestration run.
 ### `GET /runs/{run_id}/events`
 SSE stream of trace events for a run.
 
-**Event types:** `run_start`, `transcription`, `root_response`, `code_instruction`, `code_execution`, `retrieval`, `clip`, `frames`, `vision`, `sub_llm`, `run_end`, `heartbeat`, `stream_end`, `stream_error`
+**Event types:** `run_start`, `root_response`, `code_instruction`, `code_execution`, `video_inspection`, `frame_inspection`, `audio_analysis`, `sub_llm`, `run_end`, `heartbeat`, `stream_end`, `stream_error`
 
 **Event format:**
 ```
@@ -62,7 +64,7 @@ data: {"kind": "root_response", "timestamp": 1712234567.89, "payload": {...}}
 
 ## Architecture
 
-- `OrchestratorService` manages background threads for `VideoRLM_REPL.completion()`
+- `OrchestratorService` manages background threads for `Agent.ask()`
 - SSE polling reads from `Tracer.events` (append-only list, GIL-safe)
 - Heartbeat sent every 2s to keep connections alive
 - Stream closes after `run_end` event + `stream_end` sentinel

@@ -1,6 +1,12 @@
 /** API client for the Sanjaya backend. */
 
-import type { TraceEvent } from "./types";
+import type {
+  BenchmarkCatalog,
+  BenchmarkJobSummary,
+  BenchmarkPromptTraceResponse,
+  BenchmarkData,
+  TraceEvent,
+} from "./types";
 
 export interface HistoryEntry {
   runId: string;
@@ -24,7 +30,7 @@ export async function fetchHistory(): Promise<HistoryEntry[]> {
 
 export interface RunManifest {
   run_id: string;
-  clips: Record<string, {
+  clips?: Record<string, {
     clip_id: string;
     clip_path: string;
     start_s: number;
@@ -32,13 +38,22 @@ export interface RunManifest {
     frame_paths: string[];
     window_id: string;
   }>;
-  candidate_windows: Array<{
+  candidate_windows?: Array<{
     window_id: string;
     strategy: string;
     start_s: number;
     end_s: number;
     score: number;
     reason: string;
+  }>;
+  media_operations?: Array<{
+    kind: string;
+    start_s: number;
+    end_s: number;
+    artifact_path?: string;
+    prompt?: string;
+    response_preview?: string;
+    audio_summary?: string;
   }>;
   trace_events: Array<{
     kind: string;
@@ -53,11 +68,74 @@ export async function fetchRunManifest(runId: string): Promise<RunManifest | nul
   return res.json();
 }
 
-import type { BenchmarkData } from "./types";
-
 export async function fetchBenchmarks(): Promise<BenchmarkData> {
   const res = await fetch("/api/benchmarks");
   if (!res.ok) throw new Error("Failed to fetch benchmarks");
+  return res.json();
+}
+
+export async function fetchBenchmarkCatalog(): Promise<BenchmarkCatalog> {
+  const res = await fetch(`${API_BASE}/benchmark-jobs/catalog`);
+  if (!res.ok) {
+    throw new Error(`Failed to fetch benchmark catalog: ${res.status} ${res.statusText}`);
+  }
+  return res.json();
+}
+
+export interface BenchmarkJobCreateRequest {
+  benchmark_type?: "video";
+  prompt_ids?: number[];
+  workers?: number;
+  max_iterations?: number;
+  max_budget_usd?: number;
+  fast?: boolean;
+  output_dir?: string | null;
+  run_name?: string | null;
+  download_lvb?: boolean;
+}
+
+export async function createBenchmarkJob(
+  request: BenchmarkJobCreateRequest
+): Promise<BenchmarkJobSummary> {
+  const res = await fetch(`${API_BASE}/benchmark-jobs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || `Failed to create benchmark job: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function fetchBenchmarkJobs(): Promise<BenchmarkJobSummary[]> {
+  const res = await fetch(`${API_BASE}/benchmark-jobs`);
+  if (!res.ok) {
+    throw new Error(`Failed to fetch benchmark jobs: ${res.status} ${res.statusText}`);
+  }
+  return res.json();
+}
+
+export async function stopBenchmarkJob(jobId: string): Promise<BenchmarkJobSummary> {
+  const res = await fetch(`${API_BASE}/benchmark-jobs/${encodeURIComponent(jobId)}/stop`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || `Failed to stop benchmark job: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function fetchBenchmarkPromptTrace(
+  jobId: string,
+  promptId: number
+): Promise<BenchmarkPromptTraceResponse> {
+  const res = await fetch(`${API_BASE}/benchmark-jobs/${encodeURIComponent(jobId)}/prompts/${promptId}/trace`);
+  if (!res.ok) {
+    throw new Error(`Failed to fetch prompt trace: ${res.status} ${res.statusText}`);
+  }
   return res.json();
 }
 
@@ -79,8 +157,6 @@ export interface RunRequest {
   video_path: string;
   question: string;
   subtitle_path?: string;
-  subtitle_mode?: string;
-  subtitle_api_model?: string;
   max_iterations?: number;
 }
 
@@ -118,6 +194,10 @@ export function videoStreamUrl(videoRelPath: string): string {
 
 export function frameUrl(framePath: string): string {
   return `/api/frames?path=${encodeURIComponent(framePath)}`;
+}
+
+function traceEventKey(event: TraceEvent): string {
+  return `${event.kind}:${event.timestamp}:${JSON.stringify(event.payload)}`;
 }
 
 export async function submitRun(
@@ -218,6 +298,7 @@ export function streamEvents(
 ): () => void {
   const url = `${API_BASE}/runs/${runId}/events`;
   const eventSource = new EventSource(url);
+  const seenKeys = new Set<string>();
 
   const handleMessage = (e: MessageEvent) => {
     try {
@@ -232,6 +313,9 @@ export function streamEvents(
         eventSource.close();
         return;
       }
+      const key = traceEventKey(parsed);
+      if (seenKeys.has(key)) return;
+      seenKeys.add(key);
       onEvent(parsed);
     } catch {
       // ignore parse errors on heartbeats
@@ -243,18 +327,23 @@ export function streamEvents(
   const eventTypes = [
     "run_start",
     "run_end",
-    "transcription",
     "root_response",
     "root_response_start",
     "code_instruction",
     "code_execution",
-    "retrieval",
-    "clip",
-    "frames",
+    "video_inspection_start",
+    "video_inspection",
+    "frame_inspection_start",
+    "frame_inspection",
+    "audio_analysis_start",
+    "audio_analysis",
     "vision",
-    "vision_start",
     "sub_llm",
     "sub_llm_start",
+    "subcall",
+    "subcall_start",
+    "image_inspection",
+    "image_compare",
     "iteration_start",
     "iteration_end",
     "tool_call",
@@ -280,6 +369,67 @@ export function streamEvents(
   };
 
   // Return cleanup function
+  return () => {
+    eventSource.close();
+  };
+}
+
+export function streamBenchmarkJobEvents(
+  jobId: string,
+  onUpdate: (job: BenchmarkJobSummary) => void,
+  onTraceEvent: (promptId: number, event: TraceEvent) => void,
+  onError: (error: string) => void,
+  onEnd: () => void
+): () => void {
+  const url = `${API_BASE}/benchmark-jobs/${jobId}/events`;
+  const eventSource = new EventSource(url);
+
+  const handleMessage = (e: MessageEvent) => {
+    try {
+      const parsed = JSON.parse(e.data) as TraceEvent;
+      if (parsed.kind === "stream_end") {
+        onEnd();
+        eventSource.close();
+        return;
+      }
+      if (parsed.kind === "stream_error") {
+        onError((parsed.payload as { error?: string }).error ?? "Unknown error");
+        eventSource.close();
+        return;
+      }
+      if (parsed.kind === "benchmark_job_update") {
+        onUpdate(parsed.payload as unknown as BenchmarkJobSummary);
+        return;
+      }
+      if (parsed.kind === "benchmark_trace_event") {
+        const payload = parsed.payload as {
+          prompt_id?: number;
+          event?: TraceEvent;
+        };
+        if (typeof payload.prompt_id === "number" && payload.event) {
+          onTraceEvent(payload.prompt_id, payload.event);
+        }
+      }
+    } catch {
+      // ignore parse errors on heartbeats
+    }
+  };
+
+  const eventTypes = [
+    "benchmark_job_update",
+    "benchmark_trace_event",
+    "stream_end",
+    "stream_error",
+  ];
+  for (const type of eventTypes) {
+    eventSource.addEventListener(type, handleMessage);
+  }
+  eventSource.onmessage = handleMessage;
+  eventSource.onerror = () => {
+    onError("Benchmark event stream disconnected");
+    eventSource.close();
+  };
+
   return () => {
     eventSource.close();
   };
