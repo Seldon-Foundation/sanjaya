@@ -16,9 +16,10 @@ import mimetypes
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from pydantic_ai import Agent
+from pydantic_ai.exceptions import ContentFilterError, ModelHTTPError, UnexpectedModelBehavior
 from pydantic_ai.messages import BinaryContent
 from pydantic_ai.models import Model
 
@@ -26,6 +27,18 @@ from .types import CallMetadata, UsageSnapshot
 
 # Type alias: callers can pass a pre-configured Model *or* a provider string.
 ModelSpec = Model | str
+OutputT = TypeVar("OutputT")
+
+_RATE_LIMIT_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+_STRUCTURED_OUTPUT_RETRIES = 3
+
+
+class EmptyModelResponseError(RuntimeError):
+    """Raised when a model returns an empty payload after a successful call."""
+
+    def __init__(self, model_name: str):
+        super().__init__(f"Model returned an empty response: {model_name}")
+        self.model_name = model_name
 
 
 def _compress_frame(frame_path: Path, max_dim: int = 768, quality: int = 60) -> bytes:
@@ -154,6 +167,17 @@ class LLMClient:
         prompt = self._as_prompt(prompt_or_messages)
         return self._call(self.model, prompt, timeout=timeout)
 
+    def completion_with_media(
+        self,
+        prompt_or_messages: Any,
+        media: list[dict[str, Any]],
+        timeout: int = 300,
+    ) -> str:
+        """Single multimodal root completion with explicit media attachments."""
+        prompt = self._as_prompt(prompt_or_messages)
+        payload = self._build_media_content(prompt, media)
+        return self._call(self.vision_model, payload, timeout=timeout)
+
     def completion_batched(self, prompts: list[str], timeout: int = 300) -> list[str]:
         """Concurrent text completions via asyncio.gather."""
         return self._run_batched([
@@ -238,6 +262,24 @@ class LLMClient:
         """Single native multimodal completion with explicit attachments."""
         payload = self._build_media_content(prompt, media)
         return self._call(model or self.vision_model, payload, timeout=timeout)
+
+    def media_completion_structured(
+        self,
+        *,
+        prompt: str,
+        media: list[dict[str, Any]],
+        output_type: type[OutputT],
+        model: ModelSpec | None = None,
+        timeout: int = 300,
+    ) -> OutputT:
+        """Single native multimodal completion with validated structured output."""
+        payload = self._build_media_content(prompt, media)
+        return self._call_structured(
+            model or self.vision_model,
+            payload,
+            output_type=output_type,
+            timeout=timeout,
+        )
 
     def media_completion_batched(
         self,
@@ -433,9 +475,25 @@ class LLMClient:
             return "audio/mpeg"
         return "application/octet-stream"
 
-    def _run_agent(self, model: ModelSpec, payload: Any, timeout: int = 300) -> tuple[str, Any]:
+    def _run_agent(
+        self,
+        model: ModelSpec,
+        payload: Any,
+        *,
+        output_type: Any = str,
+        timeout: int = 300,
+        retries: int = 1,
+        output_retries: int | None = None,
+    ) -> tuple[Any, Any]:
         model_label = model if isinstance(model, str) else getattr(model, "model_name", "unknown")
-        agent = Agent(model=model, output_type=str, retries=1, defer_model_check=True, name=f"sanjaya:{self.name}:{model_label}")
+        agent = Agent(
+            model=model,
+            output_type=output_type,
+            retries=retries,
+            output_retries=output_retries,
+            defer_model_check=True,
+            name=f"sanjaya:{self.name}:{model_label}",
+        )
 
         # Always use the persistent background loop so the AsyncOpenAI
         # client's connection pool stays alive for TLS cleanup.  Using
@@ -457,8 +515,72 @@ class LLMClient:
         future = asyncio.run_coroutine_threadsafe(_run_with_context(), loop)
         result = future.result(timeout=timeout)
 
-        response = result.output if hasattr(result, "output") else str(result)
-        return str(response), result
+        response = result.output if hasattr(result, "output") else result
+        return response, result
+
+    def _model_label(self, model: ModelSpec) -> str:
+        return model if isinstance(model, str) else getattr(model, "model_name", type(model).__name__)
+
+    def _error_text(self, err: BaseException) -> str:
+        text = str(err).strip()
+        return text or err.__class__.__name__
+
+    def _validate_text_response(self, model: ModelSpec, response: Any) -> str:
+        text = response if isinstance(response, str) else str(response)
+        if not text.strip():
+            raise EmptyModelResponseError(self._model_label(model))
+        return text
+
+    def _is_rate_limit_error(self, err: BaseException) -> bool:
+        if isinstance(err, ModelHTTPError) and err.status_code in _RATE_LIMIT_STATUS_CODES:
+            return True
+        text = self._error_text(err).lower()
+        return any(
+            marker in text
+            for marker in (
+                "resource_exhausted",
+                "rate limit",
+                "rate-limit",
+                "too many requests",
+                "quota",
+                "status_code: 429",
+            )
+        )
+
+    def _is_output_validation_error(self, err: BaseException) -> bool:
+        if isinstance(err, UnexpectedModelBehavior):
+            text = self._error_text(err).lower()
+            return "output validation" in text or "maximum retries" in text
+        text = self._error_text(err).lower()
+        return "output validation" in text or "modelretry" in text
+
+    def _is_empty_response_error(self, err: BaseException) -> bool:
+        if isinstance(err, (EmptyModelResponseError, ContentFilterError)):
+            return True
+        text = self._error_text(err).lower()
+        return "empty response" in text or "empty output" in text
+
+    def _should_retry(self, err: BaseException) -> bool:
+        if self._is_rate_limit_error(err):
+            return True
+        if self._is_output_validation_error(err):
+            return True
+        if self._is_empty_response_error(err):
+            return True
+        if isinstance(err, ModelHTTPError):
+            return err.status_code >= 500 or err.status_code in _RATE_LIMIT_STATUS_CODES
+        return True
+
+    def _retry_delay_s(self, attempt: int, err: BaseException) -> float:
+        if self._is_rate_limit_error(err):
+            base, cap = 4.0, 45.0
+        elif self._is_output_validation_error(err):
+            base, cap = 1.5, 12.0
+        elif self._is_empty_response_error(err):
+            base, cap = 1.0, 8.0
+        else:
+            base, cap = 1.0, 8.0
+        return min(base * (2 ** (attempt - 1)), cap)
 
     async def _run_agent_async(self, model: ModelSpec, payload: Any) -> tuple[str, Any]:
         model_label = model if isinstance(model, str) else getattr(model, "model_name", "unknown")
@@ -556,7 +678,7 @@ class LLMClient:
         self.last_call_metadata = meta
         return meta
 
-    def _call(self, model: ModelSpec, payload: Any, timeout: int = 300, max_retries: int = 2) -> str:
+    def _call(self, model: ModelSpec, payload: Any, timeout: int = 300, max_retries: int = 4) -> str:
         """Core call with timeout, retry, and fallback."""
         start = time.time()
         self.last_usage = None
@@ -566,14 +688,14 @@ class LLMClient:
         for attempt in range(1, max_retries + 1):
             try:
                 response, result = self._run_agent(model, payload, timeout=timeout)
+                response = self._validate_text_response(model, response)
                 self._capture_usage(result)
                 self._capture_metadata(model, result, start)
                 return response
             except Exception as err:
                 last_err = err
-                if attempt < max_retries:
-                    import time as _time
-                    _time.sleep(min(2 ** attempt, 8))
+                if attempt < max_retries and self._should_retry(err):
+                    time.sleep(self._retry_delay_s(attempt, err))
                     continue
                 break
 
@@ -581,9 +703,66 @@ class LLMClient:
         if self.fallback_model and last_err is not None:
             try:
                 response, result = self._run_agent(self.fallback_model, payload, timeout=timeout)
+                response = self._validate_text_response(self.fallback_model, response)
                 self._capture_usage(result)
                 meta = self._capture_metadata(self.fallback_model, result, start, fallback_used=True)
-                meta.primary_error = str(last_err)
+                meta.primary_error = self._error_text(last_err)
+                return response
+            except Exception:
+                pass
+
+        if last_err is not None:
+            raise last_err
+        raise RuntimeError("Unreachable")
+
+    def _call_structured(
+        self,
+        model: ModelSpec,
+        payload: Any,
+        *,
+        output_type: type[OutputT],
+        timeout: int = 300,
+        max_retries: int = 3,
+    ) -> OutputT:
+        """Core structured call with timeout, retry, and fallback."""
+        start = time.time()
+        self.last_usage = None
+        self.last_call_metadata = None
+
+        last_err: Exception | None = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                response, result = self._run_agent(
+                    model,
+                    payload,
+                    output_type=output_type,
+                    timeout=timeout,
+                    retries=2,
+                    output_retries=_STRUCTURED_OUTPUT_RETRIES,
+                )
+                self._capture_usage(result)
+                self._capture_metadata(model, result, start)
+                return response
+            except Exception as err:
+                last_err = err
+                if attempt < max_retries and self._should_retry(err):
+                    time.sleep(self._retry_delay_s(attempt, err))
+                    continue
+                break
+
+        if self.fallback_model and last_err is not None:
+            try:
+                response, result = self._run_agent(
+                    self.fallback_model,
+                    payload,
+                    output_type=output_type,
+                    timeout=timeout,
+                    retries=2,
+                    output_retries=_STRUCTURED_OUTPUT_RETRIES,
+                )
+                self._capture_usage(result)
+                meta = self._capture_metadata(self.fallback_model, result, start, fallback_used=True)
+                meta.primary_error = self._error_text(last_err)
                 return response
             except Exception:
                 pass

@@ -89,9 +89,27 @@ def test_start_job_uses_fast_defaults_and_selected_prompt_ids(
 
     assert summary.prompt_ids == [13]
     assert summary.max_iterations == 10
+    assert summary.max_depth == 2
     assert summary.max_budget_usd == 0.5
     assert summary.prompts[0].prompt_id == 13
     assert summary.prompts[0].status == "pending"
+
+
+def test_start_job_respects_custom_max_depth(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_video_module,
+) -> None:
+    monkeypatch.setattr(benchmark_jobs, "load_video_benchmark_module", lambda: fake_video_module)
+    monkeypatch.setattr(benchmark_jobs.threading, "Thread", FakeThread)
+    monkeypatch.setattr(benchmark_jobs, "_is_valid_video_path", lambda _path: (True, None))
+
+    service = BenchmarkJobService()
+    summary = service.start_job(BenchmarkJobCreateRequest(
+        prompt_ids=[1],
+        max_depth=3,
+    ))
+
+    assert summary.max_depth == 3
 
 
 def test_start_job_rejects_unknown_prompt_ids(monkeypatch: pytest.MonkeyPatch, fake_video_module) -> None:
@@ -217,3 +235,73 @@ def test_run_job_marks_invalid_existing_video_as_error(
     demo_prompt = next(prompt for prompt in final.prompts if prompt.prompt_id == 1)
     assert demo_prompt.status == "error"
     assert demo_prompt.error == "Could not parse duration: None"
+
+
+def test_run_job_downloads_missing_lvb_video_before_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_video_module,
+) -> None:
+    monkeypatch.setattr(benchmark_jobs, "load_video_benchmark_module", lambda: fake_video_module)
+    monkeypatch.setattr(benchmark_jobs.threading, "Thread", FakeThread)
+
+    lvb_path = Path(fake_video_module.VIDEOS["lvb_video"]["video"])
+    lvb_path.unlink()
+    download_calls: list[str] = []
+
+    def fake_validate(path: Path) -> tuple[bool, str | None]:
+        if path.exists():
+            return True, None
+        return False, f"Missing video: {path}"
+
+    def fake_download(_video_cfg) -> tuple[bool, str | None]:
+        download_calls.append("called")
+        lvb_path.write_bytes(b"downloaded")
+        return True, None
+
+    monkeypatch.setattr(benchmark_jobs, "_is_valid_video_path", fake_validate)
+    monkeypatch.setattr(BenchmarkJobService, "_download_single_lvb_video", lambda self, video_cfg: fake_download(video_cfg))
+
+    service = BenchmarkJobService()
+    created = service.start_job(BenchmarkJobCreateRequest(prompt_ids=[13], download_lvb=False))
+    record = service.get_job_record(created.job_id)
+    assert record is not None
+
+    service._download_selected_lvb_videos(record, fake_video_module.PROMPTS, fake_video_module)
+
+    assert download_calls == ["called"]
+    assert lvb_path.exists()
+
+
+def test_download_single_lvb_video_uses_proxy_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    video_path = tmp_path / "lvb.mp4"
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(
+        benchmark_jobs,
+        "_load_download_proxies",
+        lambda: ("http://user:pass@127.0.0.1:9999",),
+    )
+
+    def fake_run(command, **kwargs):
+        commands.append(list(command))
+        video_path.write_bytes(b"downloaded")
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(benchmark_jobs.subprocess, "run", fake_run)
+    monkeypatch.setattr(benchmark_jobs, "_is_valid_video_path", lambda _path: (True, None))
+
+    service = BenchmarkJobService()
+    ok, error = service._download_single_lvb_video({
+        "youtube_id": "abc123",
+        "video": str(video_path),
+    })
+
+    assert ok is True
+    assert error is None
+    assert commands
+    assert "--proxy" in commands[0]
+    proxy_index = commands[0].index("--proxy")
+    assert commands[0][proxy_index + 1] == "http://user:pass@127.0.0.1:9999"

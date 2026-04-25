@@ -4,7 +4,7 @@ from __future__ import annotations
 
 
 DEFAULT_ROOT_MODEL = "google-vertex:gemini-3.1-pro-preview"
-DEFAULT_SUB_MODEL = "google-vertex:gemini-3.1-pro-preview"
+DEFAULT_SUB_MODEL = "google-vertex:gemini-3-flash-preview"
 DEFAULT_VISION_MODEL = "google-vertex:gemini-3.1-pro-preview"
 DEFAULT_AUDIO_MODEL = "google-vertex:gemini-3-flash-preview"
 DEFAULT_CAPTION_MODEL = "moondream:moondream3-preview"

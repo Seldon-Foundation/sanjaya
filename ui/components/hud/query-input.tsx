@@ -10,6 +10,7 @@ interface RunParams {
   videoPath: string;
   question: string;
   maxIterations: number;
+  maxDepth: number;
 }
 
 interface QueryInputProps {
@@ -23,6 +24,7 @@ export function QueryInput({ onSubmit, onVideoChange, disabled }: QueryInputProp
   const [videoPath, setVideoPath] = useState("");
   const [question, setQuestion] = useState("");
   const [maxIterations, setMaxIterations] = useState(20);
+  const [maxDepth, setMaxDepth] = useState(1);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [showPreview, setShowPreview] = useState(false);
 
@@ -47,6 +49,7 @@ export function QueryInput({ onSubmit, onVideoChange, disabled }: QueryInputProp
         videoPath: videoPath.trim(),
         question: question.trim(),
         maxIterations,
+        maxDepth,
       });
     }
   };
@@ -125,7 +128,7 @@ export function QueryInput({ onSubmit, onVideoChange, disabled }: QueryInputProp
         </div>
 
         {/* Control knobs row */}
-        <div className="grid grid-cols-1 gap-2">
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
           <div>
             <label className={labelClass}>MAX ITERATIONS</label>
             <input
@@ -134,6 +137,18 @@ export function QueryInput({ onSubmit, onVideoChange, disabled }: QueryInputProp
               max={50}
               value={maxIterations}
               onChange={(e) => setMaxIterations(Number(e.target.value) || 20)}
+              disabled={disabled}
+              className={inputClass}
+            />
+          </div>
+          <div>
+            <label className={labelClass}>MAX DEPTH</label>
+            <input
+              type="number"
+              min={1}
+              max={8}
+              value={maxDepth}
+              onChange={(e) => setMaxDepth(Number(e.target.value) || 1)}
               disabled={disabled}
               className={inputClass}
             />

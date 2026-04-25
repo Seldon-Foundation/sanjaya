@@ -189,6 +189,7 @@ export interface BenchmarkCatalog {
   defaults: {
     workers: number;
     max_iterations: number;
+    max_depth: number;
     max_budget_usd: number;
     fast: boolean;
     download_lvb: boolean;
@@ -236,6 +237,7 @@ export interface BenchmarkJobSummary {
   models: Record<string, string | null>;
   workers: number;
   max_iterations: number;
+  max_depth: number;
   max_budget_usd: number;
   fast: boolean;
   download_lvb: boolean;

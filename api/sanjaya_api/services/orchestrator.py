@@ -42,6 +42,7 @@ class OrchestratorService:
         question: str,
         subtitle_path: str | None = None,
         max_iterations: int = 20,
+        max_depth: int = 1,
     ) -> str:
         """Start a new video orchestration run in a background thread, return run_id."""
         run_id = f"live_run_videos_{uuid4().hex[:12]}"
@@ -52,7 +53,7 @@ class OrchestratorService:
 
         thread = threading.Thread(
             target=self._run_completion,
-            args=(record, video_path, question, subtitle_path, max_iterations),
+            args=(record, video_path, question, subtitle_path, max_iterations, max_depth),
             daemon=True,
         )
         record.thread = thread
@@ -79,6 +80,7 @@ class OrchestratorService:
         question: str,
         subtitle_path: str | None,
         max_iterations: int,
+        max_depth: int,
     ) -> None:
         """Execute Agent.ask() in a background thread."""
         record.status = "running"
@@ -87,7 +89,7 @@ class OrchestratorService:
         record.tracer = tracer
 
         try:
-            agent = Agent(max_iterations=max_iterations, tracing=True)
+            agent = Agent(max_iterations=max_iterations, max_depth=max_depth, tracing=True)
             agent._tracer = tracer
             agent.use(VideoToolkit())
 

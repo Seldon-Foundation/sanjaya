@@ -144,6 +144,7 @@ class Agent:
         # LLM clients
         self._orchestrator = LLMClient(
             model=model,
+            vision_model=vision_model or model,
             fallback_model=fallback_model,
             name="root_llm",
         )
@@ -196,24 +197,33 @@ class Agent:
         """Register tools or toolkits. Chainable."""
         for item in tools_or_toolkits:
             if isinstance(item, Toolkit):
-                # Inject LLM client and tracer for vision-capable toolkits
-                if hasattr(item, "_llm_client"):
-                    item._llm_client = self._sub_llm
-                if hasattr(item, "_tracer"):
-                    item._tracer = self._tracer
-                if hasattr(item, "_budget"):
-                    item._budget = self._budget
-                if hasattr(item, "_audio_llm_client"):
-                    item._audio_llm_client = self._audio_llm
-                if hasattr(item, "_captioner") and self._captioner is not None:
-                    item._captioner = self._captioner
-                item._prompt_config = self._prompts
+                self._bind_toolkit_runtime(item)
                 self._registry.register_toolkit(item)
             elif isinstance(item, Tool):
                 self._registry.register(item)
             else:
                 raise TypeError(f"Expected Tool or Toolkit, got {type(item).__name__}")
         return self
+
+    def _bind_toolkit_runtime(
+        self,
+        toolkit: Toolkit,
+        *,
+        inspect_client: LLMClient | None = None,
+    ) -> None:
+        if hasattr(toolkit, "_llm_client"):
+            toolkit._llm_client = self._sub_llm
+        if hasattr(toolkit, "_inspect_llm_client"):
+            toolkit._inspect_llm_client = inspect_client or self._orchestrator
+        if hasattr(toolkit, "_tracer"):
+            toolkit._tracer = self._tracer
+        if hasattr(toolkit, "_budget"):
+            toolkit._budget = self._budget
+        if hasattr(toolkit, "_audio_llm_client"):
+            toolkit._audio_llm_client = self._audio_llm
+        if hasattr(toolkit, "_captioner") and self._captioner is not None:
+            toolkit._captioner = self._captioner
+        toolkit._prompt_config = self._prompts
 
     def _build_runtime_registry(
         self,
@@ -388,6 +398,7 @@ class Agent:
             start_s=request["start_s"],
             end_s=request["end_s"],
             source=source,
+            trace_depth=trace_depth,
         )
 
         with trace_cm as media_trace:
@@ -439,33 +450,21 @@ class Agent:
         if video and not self._has_video_toolkit():
             from .tools.video import VideoToolkit
             vt = VideoToolkit()
-            vt._llm_client = self._sub_llm
-            vt._audio_llm_client = self._audio_llm
-            vt._tracer = self._tracer
-            vt._budget = self._budget
-            vt._prompt_config = self._prompts
+            self._bind_toolkit_runtime(vt)
             self._registry.register_toolkit(vt)
 
         # Auto-register DocumentToolkit if document= provided and none registered
         if document and not self._has_document_toolkit():
             from .tools.document import DocumentToolkit
             dt = DocumentToolkit()
-            dt._llm_client = self._sub_llm
-            dt._tracer = self._tracer
-            dt._budget = self._budget
-            dt._prompt_config = self._prompts
+            self._bind_toolkit_runtime(dt)
             self._registry.register_toolkit(dt)
 
         # Auto-register ImageToolkit if image= provided and none registered
         if image and not self._has_image_toolkit():
             from .tools.image import ImageToolkit
             it = ImageToolkit()
-            it._llm_client = self._sub_llm
-            it._tracer = self._tracer
-            it._budget = self._budget
-            it._prompt_config = self._prompts
-            if self._captioner is not None:
-                it._captioner = self._captioner
+            self._bind_toolkit_runtime(it)
             self._registry.register_toolkit(it)
 
         # Build context dict for toolkits (modality classified later, inside the
@@ -510,7 +509,7 @@ class Agent:
                 end_s=end_s,
                 source="llm_query",
                 budget=self._budget,
-                trace_depth=0,
+                trace_depth=1,
             )
 
         def _llm_query_batched(queries: list[Any]) -> list[str]:
@@ -531,7 +530,7 @@ class Agent:
                         batched=True,
                         budget=self._budget,
                         client=self._make_sub_llm_client(name="sub_llm_batched"),
-                        trace_depth=0,
+                        trace_depth=1,
                     )
                     for entry in normalized
                 ]
@@ -879,7 +878,7 @@ class Agent:
                         end_s=end_s,
                         source="llm_query",
                         budget=child_budget,
-                        trace_depth=depth,
+                        trace_depth=depth + 1,
                     )
 
                 def _child_llm_query_batched(queries: list[Any]) -> list[str]:
@@ -899,7 +898,7 @@ class Agent:
                                 batched=True,
                                 budget=child_budget,
                                 client=self._make_sub_llm_client(name=f"child_sub_llm_d{depth}_batched"),
-                                trace_depth=depth,
+                                trace_depth=depth + 1,
                             )
                             for entry in normalized
                         ]
@@ -981,6 +980,9 @@ class Agent:
                     fallback_model=None,
                     name=f"child_rlm_d{depth}",
                 )
+                for toolkit in child_registry.toolkits:
+                    if hasattr(toolkit, "_inspect_llm_client"):
+                        toolkit._inspect_llm_client = child_orchestrator
 
                 child_max_iters = min(self.max_iterations, 10)
 

@@ -87,6 +87,7 @@ export interface BenchmarkJobCreateRequest {
   prompt_ids?: number[];
   workers?: number;
   max_iterations?: number;
+  max_depth?: number;
   max_budget_usd?: number;
   fast?: boolean;
   output_dir?: string | null;
@@ -158,6 +159,7 @@ export interface RunRequest {
   question: string;
   subtitle_path?: string;
   max_iterations?: number;
+  max_depth?: number;
 }
 
 export interface VideoEntry {

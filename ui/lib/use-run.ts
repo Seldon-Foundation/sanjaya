@@ -98,6 +98,7 @@ export function useRun() {
       videoPath: string;
       question: string;
       maxIterations?: number;
+      maxDepth?: number;
     }) => {
       // Cleanup any existing connection
       if (cleanupRef.current) {
@@ -114,6 +115,7 @@ export function useRun() {
           video_path: params.videoPath,
           question: params.question,
           max_iterations: params.maxIterations,
+          max_depth: params.maxDepth,
         });
 
         setState((prev) => ({ ...prev, runId: run_id }));

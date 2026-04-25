@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
+
+from pydantic import BaseModel, Field
 
 from ...answer import Evidence
 from ..base import Tool, Toolkit, ToolParam
@@ -34,9 +35,12 @@ If a span is too broad, split it before delegating.
 - `get_video_info()` — inspect source metadata such as duration, resolution,
   codec, fps, and file size before you plan your slices.
 
-- `inspect_video(prompt, start_s, end_s)` — inspect one explicit video slice.
-  Use this to understand what is happening visually in a short region.
-  If `start_s == end_s`, this becomes a single-frame inspection at that second.
+- `inspect_video(start_s, end_s)` — attach one explicit video slice to the
+  current RLM layer's next root-model turn. This is promptless: you are not
+  sending a separate inspection prompt. You are pulling that slice into your
+  own current reasoning context so your next root response can directly use it.
+  Call it in one iteration, then reason over the attached media in the next root turn.
+  If `start_s == end_s`, this becomes a single-frame attachment at that second.
 
 - `analyze_audio(start_s, end_s, prompt=None)` — transcribe and analyze the audio
   from one explicit, non-zero slice. Returns structured data with transcript,
@@ -68,6 +72,23 @@ class _NullTrace:
         return
 
 
+class AudioAnalysisResult(BaseModel):
+    """Validated structured result returned by `analyze_audio()`."""
+
+    transcript: str = Field(
+        default="",
+        description="Verbatim or near-verbatim spoken words when audible.",
+    )
+    audio_summary: str = Field(
+        default="",
+        description="Concise description of what is happening in the audio slice.",
+    )
+    salient_audio_events: list[str] = Field(
+        default_factory=list,
+        description="Short list of notable sounds, music, speaker changes, or non-speech events.",
+    )
+
+
 def _model_label(model: Any) -> str:
     if isinstance(model, str):
         return model
@@ -86,18 +107,6 @@ def _merge_ranges(ranges: list[tuple[float, float]]) -> list[tuple[float, float]
         else:
             merged.append((start_s, end_s))
     return merged
-
-
-def _strip_code_fence(text: str) -> str:
-    stripped = text.strip()
-    if not stripped.startswith("```"):
-        return stripped
-    lines = stripped.splitlines()
-    if lines:
-        lines = lines[1:]
-    while lines and lines[-1].strip().startswith("```"):
-        lines = lines[:-1]
-    return "\n".join(lines).strip()
 
 
 class VideoToolkit(Toolkit):
@@ -120,6 +129,7 @@ class VideoToolkit(Toolkit):
         self._mount: WorkspaceMount | None = None
 
         self._llm_client: Any = None
+        self._inspect_llm_client: Any = None
         self._audio_llm_client: Any = None
         self._tracer: Any = None
         self._budget: Any = None
@@ -134,6 +144,7 @@ class VideoToolkit(Toolkit):
         self._inspections: list[dict[str, Any]] = []
         self._audio_analyses: list[dict[str, Any]] = []
         self._single_frame_inspections: list[dict[str, Any]] = []
+        self._pending_root_media: list[dict[str, Any]] = []
 
     def setup(self, context: dict[str, Any]) -> None:
         video = context.get("video")
@@ -170,6 +181,7 @@ class VideoToolkit(Toolkit):
         child._workspace = self._workspace
         child._mount = self._mount
         child._llm_client = self._llm_client
+        child._inspect_llm_client = self._inspect_llm_client
         child._audio_llm_client = self._audio_llm_client
         child._tracer = self._tracer
         child._budget = self._budget
@@ -182,6 +194,7 @@ class VideoToolkit(Toolkit):
         child._inspections = self._inspections
         child._audio_analyses = self._audio_analyses
         child._single_frame_inspections = self._single_frame_inspections
+        child._pending_root_media = []
         return child
 
     def teardown(self) -> None:
@@ -220,6 +233,15 @@ class VideoToolkit(Toolkit):
             "recent_inspected_spans": self._inspections[-8:],
             "recent_audio_spans": self._audio_analyses[-8:],
             "single_frame_inspections": self._single_frame_inspections[-8:],
+            "pending_root_inspections": [
+                {
+                    "kind": entry["kind"],
+                    "start_s": entry["start_s"],
+                    "end_s": entry["end_s"],
+                    "source": entry["source"],
+                }
+                for entry in self._pending_root_media[-8:]
+            ],
             "total_coverage_s": total_coverage_s,
             "run_id": self._workspace.run_id if self._workspace else None,
         }
@@ -374,7 +396,7 @@ class VideoToolkit(Toolkit):
             "start_s": start_s,
             "end_s": end_s,
             "prompt": prompt,
-            "response_preview": response[:300],
+            "response_preview": response[:300] if response else None,
             "artifact_path": artifact_path,
             "source": source,
             "model": model,
@@ -414,54 +436,86 @@ class VideoToolkit(Toolkit):
             self._workspace.record_media_operation(entry)
         return entry
 
+    def queue_root_inspection(
+        self,
+        *,
+        start_s: float,
+        end_s: float,
+    ) -> dict[str, Any]:
+        request = self.prepare_media_request(
+            start_s=start_s,
+            end_s=end_s,
+            media_kind="video",
+        )
+        model_label = _model_label(getattr(self._inspect_llm_client, "vision_model", None) or "root_multimodal")
+        trace_cm = self._media_trace_context(
+            kind=request["kind"],
+            model=model_label,
+            prompt="",
+            start_s=request["start_s"],
+            end_s=request["end_s"],
+            source="inspect_video",
+        )
+
+        with trace_cm as trace:
+            trace.record(
+                attachment_mode="root_context",
+                attachment_status="queued",
+                media_kind=request["kind"],
+                artifact_path=request["artifact_path"],
+                response_preview="Attached to the current root context for the next turn.",
+            )
+
+        self.record_inspection(
+            start_s=request["start_s"],
+            end_s=request["end_s"],
+            prompt="",
+            response="",
+            artifact_path=request["artifact_path"],
+            kind=request["kind"],
+            source="inspect_video",
+            model=model_label,
+        )
+
+        queued = {
+            "kind": request["kind"],
+            "start_s": request["start_s"],
+            "end_s": request["end_s"],
+            "source": "inspect_video",
+            "media": request["media"],
+        }
+        self._pending_root_media.append(queued)
+        return queued
+
+    def drain_pending_root_media(self) -> list[dict[str, Any]]:
+        pending = list(self._pending_root_media)
+        self._pending_root_media.clear()
+        return pending
+
     def _make_inspect_video_tool(self) -> Tool:
         toolkit = self
 
-        def _inspect_video(prompt: str, start_s: float, end_s: float) -> str:
-            if toolkit._llm_client is None:
-                raise RuntimeError("Video LLM client is not configured.")
-
-            request = toolkit.prepare_media_request(
-                start_s=start_s,
-                end_s=end_s,
-                media_kind="video",
-            )
-            model_label = _model_label(toolkit._llm_client.vision_model)
-            trace_cm = toolkit._media_trace_context(kind=request["kind"], model=model_label, prompt=prompt, start_s=request["start_s"], end_s=request["end_s"], source="inspect_video")
-
-            with trace_cm as trace:
-                response = toolkit._llm_client.media_completion(
-                    prompt=prompt,
-                    media=request["media"],
+        def _inspect_video(start_s: float, end_s: float) -> str:
+            queued = toolkit.queue_root_inspection(start_s=start_s, end_s=end_s)
+            if queued["kind"] == "frame":
+                return (
+                    f"Queued frame attachment at {queued['start_s']:.1f}s for the next "
+                    "root-model turn."
                 )
-                trace.record_response(response)
-                toolkit._record_client_usage(toolkit._llm_client, trace)
-                trace.record(
-                    media_kind=request["kind"],
-                    artifact_path=request["artifact_path"],
-                )
-
-            toolkit.record_inspection(
-                start_s=request["start_s"],
-                end_s=request["end_s"],
-                prompt=prompt,
-                response=response,
-                artifact_path=request["artifact_path"],
-                kind=request["kind"],
-                source="inspect_video",
-                model=model_label,
+            return (
+                f"Queued video attachment [{queued['start_s']:.1f}s - {queued['end_s']:.1f}s] "
+                "for the next root-model turn."
             )
-            return response
 
         return Tool(
             name="inspect_video",
             description=(
-                "Inspect one explicit slice of the video with the native multimodal model. "
-                "Use small spans to avoid context rot. If start_s == end_s, this inspects a single frame."
+                "Attach one explicit slice of the video to the current root-model context. "
+                "This is promptless: the next root turn will directly see the slice. "
+                "If start_s == end_s, this attaches a single frame."
             ),
             fn=_inspect_video,
             parameters={
-                "prompt": ToolParam(name="prompt", type_hint="str", description="What to inspect in this slice."),
                 "start_s": ToolParam(name="start_s", type_hint="float", description="Absolute start time in seconds."),
                 "end_s": ToolParam(name="end_s", type_hint="float", description="Absolute end time in seconds."),
             },
@@ -482,9 +536,8 @@ class VideoToolkit(Toolkit):
                 media_kind="audio",
             )
             full_prompt = (
-                "Analyze this audio slice and return JSON with keys "
-                '`transcript`, `audio_summary`, and `salient_audio_events`. '
-                "Use transcript for near-verbatim spoken words when audible, "
+                "Analyze this audio slice. "
+                "Use transcript for verbatim spoken words when audible, "
                 "audio_summary for a concise description, and salient_audio_events "
                 "for a short list of sounds, music, speaker changes, or notable non-speech events."
             )
@@ -502,26 +555,26 @@ class VideoToolkit(Toolkit):
             )
 
             with trace_cm as trace:
-                response = audio_client.media_completion(
+                parsed = audio_client.media_completion_structured(
                     prompt=full_prompt,
                     media=request["media"],
+                    output_type=AudioAnalysisResult,
                     model=audio_client.model,
                 )
-                trace.record_response(response)
+                trace.record_response(parsed.model_dump_json())
                 toolkit._record_client_usage(audio_client, trace)
                 trace.record(media_kind="audio", artifact_path=request["artifact_path"])
 
-            parsed = toolkit._parse_audio_response(response)
             toolkit.record_audio_analysis(
                 start_s=request["start_s"],
                 end_s=request["end_s"],
                 prompt=full_prompt,
                 artifact_path=request["artifact_path"],
-                result=parsed,
+                result=parsed.model_dump(),
                 source="analyze_audio",
                 model=model_label,
             )
-            return parsed
+            return parsed.model_dump()
 
         return Tool(
             name="analyze_audio",
@@ -552,9 +605,11 @@ class VideoToolkit(Toolkit):
         start_s: float,
         end_s: float,
         source: str,
+        trace_depth: int | None = None,
     ) -> Any:
         if self._tracer is None:
             return nullcontext(_NullTrace())
+        effective_depth = self._trace_depth if trace_depth is None else trace_depth
         if kind == "frame":
             return self._tracer.frame_inspection(
                 model=model,
@@ -562,7 +617,7 @@ class VideoToolkit(Toolkit):
                 start_s=start_s,
                 end_s=end_s,
                 source=source,
-                depth=self._trace_depth,
+                depth=effective_depth,
             )
         if kind == "audio":
             return self._tracer.audio_analysis(
@@ -571,7 +626,7 @@ class VideoToolkit(Toolkit):
                 start_s=start_s,
                 end_s=end_s,
                 source=source,
-                depth=self._trace_depth,
+                depth=effective_depth,
             )
         return self._tracer.video_inspection(
             model=model,
@@ -579,7 +634,7 @@ class VideoToolkit(Toolkit):
             start_s=start_s,
             end_s=end_s,
             source=source,
-            depth=self._trace_depth,
+            depth=effective_depth,
         )
 
     def _record_client_usage(self, client: Any, trace: Any) -> None:
@@ -609,25 +664,6 @@ class VideoToolkit(Toolkit):
                 fallback_used=metadata.fallback_used,
                 cost_usd=metadata.cost_usd,
             )
-
-    def _parse_audio_response(self, response: str) -> dict[str, Any]:
-        stripped = _strip_code_fence(response)
-        try:
-            parsed = json.loads(stripped)
-            if isinstance(parsed, dict):
-                return {
-                    "transcript": parsed.get("transcript", ""),
-                    "audio_summary": parsed.get("audio_summary", ""),
-                    "salient_audio_events": parsed.get("salient_audio_events", []),
-                }
-        except Exception:
-            pass
-
-        return {
-            "transcript": "",
-            "audio_summary": stripped,
-            "salient_audio_events": [],
-        }
 
     def _parse_active_span(self, value: Any) -> tuple[float, float] | None:
         if value is None:

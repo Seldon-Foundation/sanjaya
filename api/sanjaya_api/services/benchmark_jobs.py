@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import threading
 import time
 from collections import deque
@@ -30,6 +31,7 @@ from sanjaya_api.trace_events import normalize_trace_event
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 ARTIFACTS_DIR = PROJECT_ROOT / "sanjaya_artifacts"
+WEBSHARE_PROXIES_PATH = PROJECT_ROOT / "Webshare 50 proxies.txt"
 
 
 @lru_cache(maxsize=1)
@@ -76,6 +78,36 @@ def _is_valid_video_path(video_path: Path) -> tuple[bool, str | None]:
     if duration_s <= 0:
         return False, f"Invalid video duration: {duration_s}"
     return True, None
+
+
+def _is_lvb_prompt(prompt: dict[str, Any]) -> bool:
+    return bool(prompt.get("is_mcq")) or str(prompt.get("video_key", "")).startswith("lvb_")
+
+
+@lru_cache(maxsize=1)
+def _load_download_proxies() -> tuple[str, ...]:
+    """Load HTTP proxies for yt-dlp from the repo proxy list, if present."""
+    if not WEBSHARE_PROXIES_PATH.exists():
+        return ()
+
+    proxies: list[str] = []
+    for raw_line in WEBSHARE_PROXIES_PATH.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if "://" in line:
+            proxies.append(line)
+            continue
+
+        parts = line.split(":")
+        if len(parts) == 4:
+            host, port, username, password = parts
+            proxies.append(f"http://{username}:{password}@{host}:{port}")
+        elif len(parts) == 2:
+            host, port = parts
+            proxies.append(f"http://{host}:{port}")
+
+    return tuple(proxies)
 
 
 @dataclass
@@ -150,6 +182,7 @@ class BenchmarkJobService:
         defaults = {
             "workers": 6,
             "max_iterations": 20,
+            "max_depth": 2,
             "max_budget_usd": 1.0,
             "fast": False,
             "download_lvb": False,
@@ -336,6 +369,7 @@ class BenchmarkJobService:
             models=dict(record.models),
             workers=record.request.workers,
             max_iterations=record.effective_max_iterations,
+            max_depth=record.request.max_depth,
             max_budget_usd=record.effective_max_budget_usd,
             fast=record.request.fast,
             download_lvb=record.request.download_lvb,
@@ -350,6 +384,109 @@ class BenchmarkJobService:
             revision=record.revision,
         )
 
+    def _download_single_lvb_video(self, video_cfg: dict[str, Any]) -> tuple[bool, str | None]:
+        youtube_id = str(video_cfg.get("youtube_id") or "").strip()
+        output_path = Path(video_cfg["video"])
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if not youtube_id:
+            return False, f"Missing youtube_id for {output_path.name}"
+
+        base_command = [
+            "uv", "run", "--with", "yt-dlp", "yt-dlp",
+            f"https://www.youtube.com/watch?v={youtube_id}",
+            "-f", "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+            "--merge-output-format", "mp4",
+            "-o", str(output_path),
+            "--no-playlist",
+            "--socket-timeout", "30",
+        ]
+        proxies = _load_download_proxies()
+        proxy_attempts: tuple[str | None, ...] = proxies if proxies else (None,)
+        last_error: str | None = None
+
+        for proxy in proxy_attempts:
+            command = list(base_command)
+            if proxy:
+                command[5:5] = ["--proxy", proxy]
+
+            try:
+                result = subprocess.run(
+                    command,
+                    cwd=PROJECT_ROOT,
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                    check=False,
+                )
+            except Exception as exc:
+                last_error = f"Downloader launch failed for {youtube_id}: {exc}"
+                continue
+
+            if result.returncode != 0:
+                tail = (result.stderr or result.stdout or "").strip().splitlines()
+                detail = tail[-1] if tail else f"exit code {result.returncode}"
+                proxy_label = proxy or "direct"
+                last_error = f"yt-dlp failed for {youtube_id} via {proxy_label}: {detail}"
+                continue
+
+            is_valid, error = _is_valid_video_path(output_path)
+            if not is_valid:
+                proxy_label = proxy or "direct"
+                last_error = error or f"Downloaded file is still invalid via {proxy_label}: {output_path}"
+                continue
+            return True, None
+
+        return False, last_error or f"Failed to download {youtube_id}"
+
+    def _download_selected_lvb_videos(
+        self,
+        record: BenchmarkJobRecord,
+        prompts_to_run: list[dict[str, Any]],
+        module: ModuleType,
+    ) -> None:
+        selected_lvb_prompts = [prompt for prompt in prompts_to_run if _is_lvb_prompt(prompt)]
+        if not selected_lvb_prompts:
+            return
+
+        missing_paths: set[Path] = set()
+        invalid_existing_paths: set[Path] = set()
+        configs_by_path: dict[Path, dict[str, Any]] = {}
+        for prompt in selected_lvb_prompts:
+            video_cfg = module.VIDEOS[prompt["video_key"]]
+            video_path = Path(video_cfg["video"])
+            configs_by_path[video_path] = video_cfg
+            is_valid, _error = _is_valid_video_path(video_path)
+            if is_valid:
+                continue
+            if video_path.exists():
+                invalid_existing_paths.add(video_path)
+            else:
+                missing_paths.add(video_path)
+
+        if not missing_paths and not invalid_existing_paths:
+            return
+
+        for invalid_path in sorted(invalid_existing_paths):
+            try:
+                invalid_path.unlink()
+                with self._lock:
+                    self._touch(record, stdout=f"Removed invalid cached video before re-download: {invalid_path.name}")
+            except OSError as exc:
+                with self._lock:
+                    self._touch(record, stderr=f"Could not remove invalid cached video {invalid_path}: {exc}")
+
+        for path in sorted(missing_paths | invalid_existing_paths):
+            with self._lock:
+                self._touch(record, stdout=f"Downloading LongVideoBench video: {path.name}")
+            ok, error = self._download_single_lvb_video(configs_by_path[path])
+            if ok:
+                with self._lock:
+                    self._touch(record, stdout=f"Downloaded LVB video: {path.name}")
+                continue
+            with self._lock:
+                self._touch(record, stderr=error or f"Failed to download {path.name}")
+
     def _run_job(self, record: BenchmarkJobRecord) -> None:
         module = load_video_benchmark_module()
         prompt_lookup = {prompt["id"]: prompt for prompt in module.PROMPTS}
@@ -361,32 +498,8 @@ class BenchmarkJobService:
             self._touch(record, stdout=f"Starting benchmark job {record.job_id}.")
 
         try:
-            if record.request.download_lvb:
-                invalid_lvb_paths: list[Path] = []
-                seen_lvb_paths: set[Path] = set()
-                for prompt in prompts_to_run:
-                    if not prompt.get("is_mcq"):
-                        continue
-                    video_path = Path(module.VIDEOS[prompt["video_key"]]["video"])
-                    if video_path in seen_lvb_paths:
-                        continue
-                    seen_lvb_paths.add(video_path)
-                    is_valid, _error = _is_valid_video_path(video_path)
-                    if not is_valid and video_path.exists():
-                        invalid_lvb_paths.append(video_path)
-
-                for invalid_path in invalid_lvb_paths:
-                    try:
-                        invalid_path.unlink()
-                        with self._lock:
-                            self._touch(record, stdout=f"Removed invalid cached video before re-download: {invalid_path.name}")
-                    except OSError as exc:
-                        with self._lock:
-                            self._touch(record, stderr=f"Could not remove invalid cached video {invalid_path}: {exc}")
-
-                with self._lock:
-                    self._touch(record, stdout="Downloading missing LongVideoBench videos before execution.")
-                module.download_lvb_videos()
+            if record.request.download_lvb or any(_is_lvb_prompt(prompt) for prompt in prompts_to_run):
+                self._download_selected_lvb_videos(record, prompts_to_run, module)
 
             available_prompts: list[dict[str, Any]] = []
             invalid_results: list[dict[str, Any]] = []
@@ -436,7 +549,7 @@ class BenchmarkJobService:
                 },
                 "max_iterations": record.effective_max_iterations,
                 "max_budget_usd_per_prompt": record.effective_max_budget_usd,
-                "max_depth": 2,
+                "max_depth": record.request.max_depth,
                 "workers": record.request.workers,
                 "prompts": [prompt["id"] for prompt in available_prompts],
                 "n_demo_prompts": n_demo,
@@ -601,7 +714,7 @@ class BenchmarkJobService:
                 caption_model=module.CAPTION_MODEL,
                 critic_model=module.CRITIC_MODEL,
                 max_iterations=record.effective_max_iterations,
-                max_depth=2,
+                max_depth=record.request.max_depth,
                 max_budget_usd=record.effective_max_budget_usd,
                 tracing=True,
             )
@@ -652,7 +765,7 @@ class BenchmarkJobService:
                     "sub_model": module.SUB_MODEL,
                     "vision_model": module.VISION_MODEL,
                     "caption_model": module.CAPTION_MODEL,
-                    "max_depth": 2,
+                    "max_depth": record.request.max_depth,
                     "max_budget_usd": record.effective_max_budget_usd,
                     "max_iterations": record.effective_max_iterations,
                 },

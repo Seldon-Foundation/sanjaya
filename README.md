@@ -66,7 +66,7 @@ print(answer.evidence)
 
 When `video=...` is provided, `VideoToolkit` is auto-registered if you have not already added one. The live video path uses native slice-based tools:
 
-- `inspect_video(prompt, start_s, end_s)`
+- `inspect_video(start_s, end_s)`
 - `analyze_audio(start_s, end_s, prompt=None)`
 - `llm_query(...)` / `rlm_query(...)` with optional `start_s` / `end_s` for explicit scoped delegation
 
@@ -164,7 +164,7 @@ from sanjaya import Agent
 
 agent = Agent(
     model="google-vertex:gemini-3.1-pro-preview",   # Main orchestrator
-    sub_model="google-vertex:gemini-3.1-pro-preview",  # llm_query / rlm_query
+    sub_model="google-vertex:gemini-3-flash-preview",  # llm_query / rlm_query
     vision_model="google-vertex:gemini-3.1-pro-preview",  # native video slices
     audio_model="google-vertex:gemini-3-flash-preview",   # analyze_audio
     caption_model="moondream:moondream3-preview",  # Optional for image workflows

@@ -1,7 +1,7 @@
 "use client";
 
 import type { FormEvent, ReactNode } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   createBenchmarkJob,
   fetchBenchmarkCatalog,
@@ -23,6 +23,7 @@ type PromptPreset = "all" | "demo" | "lvb" | "custom";
 interface LauncherFormState {
   workers: number;
   maxIterations: number;
+  maxDepth: number;
   maxBudgetUsd: number;
   fast: boolean;
   runName: string;
@@ -175,10 +176,20 @@ function BenchmarkJobCard({
   const [stopPending, setStopPending] = useState(false);
   const seenKeysRef = useRef<Record<number, Set<string>>>({});
   const previousStatusRef = useRef(job.status);
+  const onSnapshotRef = useRef(onSnapshot);
+  const onSettledRef = useRef(onSettled);
   const selectedPromptId = useMemo(
     () => choosePromptSelection(job, manualPromptId),
     [job, manualPromptId]
   );
+
+  useEffect(() => {
+    onSnapshotRef.current = onSnapshot;
+  }, [onSnapshot]);
+
+  useEffect(() => {
+    onSettledRef.current = onSettled;
+  }, [onSettled]);
 
   useEffect(() => {
     if (!selectedPromptId) return;
@@ -204,12 +215,12 @@ function BenchmarkJobCard({
       (snapshot) => {
         const previousStatus = previousStatusRef.current;
         previousStatusRef.current = snapshot.status;
-        onSnapshot(snapshot);
+        onSnapshotRef.current(snapshot);
         if (
           (previousStatus === "pending" || previousStatus === "running" || previousStatus === "stopping") &&
           (snapshot.status === "complete" || snapshot.status === "error" || snapshot.status === "stopped")
         ) {
-          onSettled();
+          onSettledRef.current();
         }
         if (snapshot.status !== "stopping") {
           setStopPending(false);
@@ -230,7 +241,7 @@ function BenchmarkJobCard({
       () => undefined
     );
     return stop;
-  }, [job.job_id, job.status, onSettled, onSnapshot]);
+  }, [job.job_id, job.status]);
 
   const selectedPrompt = job.prompts.find((prompt) => prompt.prompt_id === selectedPromptId) ?? null;
   const selectedTrace = selectedPromptId ? traceByPrompt[selectedPromptId] ?? [] : [];
@@ -240,7 +251,7 @@ function BenchmarkJobCard({
   const handleStop = async () => {
     if (!isStoppable || stopPending || job.status === "stopping") return;
     setStopPending(true);
-    onSnapshot({
+    onSnapshotRef.current({
       ...job,
       status: "stopping",
       stop_requested_at: Date.now() / 1000,
@@ -248,7 +259,7 @@ function BenchmarkJobCard({
     });
     try {
       const snapshot = await stopBenchmarkJob(job.job_id);
-      onSnapshot(snapshot);
+      onSnapshotRef.current(snapshot);
       if (snapshot.status !== "stopping") {
         setStopPending(false);
       }
@@ -351,6 +362,7 @@ function BenchmarkJobCard({
             <FieldLabel>Job Config</FieldLabel>
             <div className="space-y-1 text-hud-dim">
               <div>Iterations: <span className="text-foreground">{job.max_iterations}</span></div>
+              <div>Max depth: <span className="text-foreground">{job.max_depth}</span></div>
               <div>Fast mode: <span className="text-foreground">{job.fast ? "on" : "off"}</span></div>
               <div>Download LVB: <span className="text-foreground">{job.download_lvb ? "on" : "off"}</span></div>
               <div>Root model: <span className="text-foreground">{shortModel(job.models.root)}</span></div>
@@ -443,6 +455,7 @@ export function BenchmarkLauncher({ onResultsChanged }: { onResultsChanged?: () 
   const [form, setForm] = useState<LauncherFormState>({
     workers: 6,
     maxIterations: 20,
+    maxDepth: 2,
     maxBudgetUsd: 1.0,
     fast: false,
     runName: "",
@@ -460,6 +473,7 @@ export function BenchmarkLauncher({ onResultsChanged }: { onResultsChanged?: () 
         setForm({
           workers: nextCatalog.defaults.workers,
           maxIterations: nextCatalog.defaults.max_iterations,
+          maxDepth: nextCatalog.defaults.max_depth,
           maxBudgetUsd: nextCatalog.defaults.max_budget_usd,
           fast: nextCatalog.defaults.fast,
           runName: "",
@@ -503,7 +517,7 @@ export function BenchmarkLauncher({ onResultsChanged }: { onResultsChanged?: () 
     ));
   };
 
-  const updateJob = (nextJob: BenchmarkJobSummary) => {
+  const updateJob = useCallback((nextJob: BenchmarkJobSummary) => {
     setJobs((current) => {
       const existing = current.some((job) => job.job_id === nextJob.job_id);
       const next = existing
@@ -511,7 +525,11 @@ export function BenchmarkLauncher({ onResultsChanged }: { onResultsChanged?: () 
         : [nextJob, ...current];
       return [...next].sort((a, b) => b.created_at - a.created_at);
     });
-  };
+  }, []);
+
+  const handleSettled = useCallback(() => {
+    onResultsChanged?.();
+  }, [onResultsChanged]);
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -528,6 +546,7 @@ export function BenchmarkLauncher({ onResultsChanged }: { onResultsChanged?: () 
         prompt_ids: selectedPromptIds,
         workers: form.workers,
         max_iterations: form.maxIterations,
+        max_depth: form.maxDepth,
         max_budget_usd: form.maxBudgetUsd,
         fast: form.fast,
         output_dir: form.outputDir.trim() || null,
@@ -666,10 +685,14 @@ export function BenchmarkLauncher({ onResultsChanged }: { onResultsChanged?: () 
               <NumberInput value={form.maxIterations} min={1} onChange={(value) => setForm((current) => ({ ...current, maxIterations: value }))} />
             </div>
             <div>
+              <FieldLabel>Max Depth</FieldLabel>
+              <NumberInput value={form.maxDepth} min={1} onChange={(value) => setForm((current) => ({ ...current, maxDepth: value }))} />
+            </div>
+            <div>
               <FieldLabel>Budget / Prompt</FieldLabel>
               <NumberInput value={form.maxBudgetUsd} min={0.01} step={0.01} onChange={(value) => setForm((current) => ({ ...current, maxBudgetUsd: value }))} />
             </div>
-            <div>
+            <div className="col-span-2">
               <FieldLabel>Run Name</FieldLabel>
               <TextInput value={form.runName} onChange={(value) => setForm((current) => ({ ...current, runName: value }))} placeholder="optional" />
             </div>
@@ -733,7 +756,7 @@ export function BenchmarkLauncher({ onResultsChanged }: { onResultsChanged?: () 
                 key={job.job_id}
                 job={job}
                 onSnapshot={updateJob}
-                onSettled={() => onResultsChanged?.()}
+                onSettled={handleSettled}
               />
             ))
           )}

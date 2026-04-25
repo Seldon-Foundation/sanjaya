@@ -81,6 +81,29 @@ def _get_toolkit_coverage(repl: AgentREPL) -> float:
     return 0.0
 
 
+def _drain_pending_root_media(repl: AgentREPL) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Collect promptless inspect_video attachments queued by toolkits."""
+    media: list[dict[str, Any]] = []
+    metadata: list[dict[str, Any]] = []
+    for toolkit in repl.registry.toolkits:
+        drain = getattr(toolkit, "drain_pending_root_media", None)
+        if not callable(drain):
+            continue
+        try:
+            pending = drain()
+        except Exception:
+            continue
+        for entry in pending:
+            media.extend(entry.get("media", []))
+            metadata.append({
+                "kind": entry.get("kind"),
+                "start_s": entry.get("start_s"),
+                "end_s": entry.get("end_s"),
+                "source": entry.get("source"),
+            })
+    return media, metadata
+
+
 def _is_stuck(
     scores: list[int],
     coverages: list[float],
@@ -129,11 +152,20 @@ def _run_iteration(
 
         # Call orchestrator LLM
         _console.print("[dim]Querying root LLM...[/]")
+        pending_media, pending_media_meta = _drain_pending_root_media(repl)
 
         with tracer.orchestrator_call(model=model_name, **trace_context) if tracer else _nullctx() as orch_trace:
-            response = orchestrator.completion(prompt)
+            if pending_media:
+                response = orchestrator.completion_with_media(prompt, pending_media)
+            else:
+                response = orchestrator.completion(prompt)
 
             if orch_trace:
+                if pending_media_meta:
+                    orch_trace.record(
+                        attached_media_count=len(pending_media),
+                        attached_media=pending_media_meta,
+                    )
                 orch_trace.record_response(response)
 
             # Track usage
@@ -457,9 +489,12 @@ def run_loop(
     # Max iterations reached — force final answer
     _console.print("[yellow]⚠️  Max iterations reached, forcing final answer[/]")
     messages.append(next_action_prompt(question, config.max_iterations - 1, final_answer=True, max_iterations=config.max_iterations))
-    forced_answer = orchestrator.completion(
-        "\n\n".join(m.get("content", "") for m in messages)
-    )
+    forced_prompt = "\n\n".join(m.get("content", "") for m in messages)
+    pending_media, _ = _drain_pending_root_media(repl)
+    if pending_media:
+        forced_answer = orchestrator.completion_with_media(forced_prompt, pending_media)
+    else:
+        forced_answer = orchestrator.completion(forced_prompt)
 
     return LoopResult(
         raw_answer=forced_answer,

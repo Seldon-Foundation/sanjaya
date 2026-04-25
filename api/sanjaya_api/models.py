@@ -14,6 +14,7 @@ class RunRequest(BaseModel):
     question: str
     subtitle_path: str | None = None
     max_iterations: int = 20
+    max_depth: int = Field(default=1, ge=1, le=8)
 
 
 class DocumentRunRequest(BaseModel):
@@ -72,6 +73,7 @@ class BenchmarkJobCreateRequest(BaseModel):
     prompt_ids: list[int] | None = None
     workers: int = Field(default=6, ge=1, le=32)
     max_iterations: int = Field(default=20, ge=1, le=100)
+    max_depth: int = Field(default=2, ge=1, le=8)
     max_budget_usd: float = Field(default=1.0, gt=0)
     fast: bool = False
     output_dir: str | None = None
@@ -126,6 +128,7 @@ class BenchmarkJobSummary(BaseModel):
     models: dict[str, str | None]
     workers: int
     max_iterations: int
+    max_depth: int
     max_budget_usd: float
     fast: bool
     download_lvb: bool

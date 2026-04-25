@@ -26,6 +26,7 @@ async def start_run(request: RunRequest) -> RunResponse:
         question=request.question,
         subtitle_path=request.subtitle_path,
         max_iterations=request.max_iterations,
+        max_depth=request.max_depth,
     )
     return RunResponse(run_id=run_id)
 
