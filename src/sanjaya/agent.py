@@ -99,6 +99,7 @@ class Agent:
         self,
         model: ModelSpec = DEFAULT_ROOT_MODEL,
         sub_model: ModelSpec = DEFAULT_SUB_MODEL,
+        recursive_model: ModelSpec | None = None,
         vision_model: ModelSpec | None = DEFAULT_VISION_MODEL,
         audio_model: ModelSpec | None = DEFAULT_AUDIO_MODEL,
         caption_model: ModelSpec | None = DEFAULT_CAPTION_MODEL,
@@ -119,6 +120,11 @@ class Agent:
         # The primary model is resolved first so siblings can inherit from it.
         model = _resolve_model(model, provider)
         sub_model = _resolve_model(sub_model, provider, primary=model)
+        recursive_model = (
+            sub_model
+            if recursive_model is None
+            else _resolve_model(recursive_model, provider, primary=model)
+        )
         if vision_model is not None:
             vision_model = _resolve_model(vision_model, provider, primary=model)
         if audio_model is not None:
@@ -129,6 +135,7 @@ class Agent:
         self._prompts = prompts or PromptConfig()
         self.model = model
         self.sub_model = sub_model
+        self.recursive_model = recursive_model
         self.vision_model = vision_model
         self.audio_model = audio_model
         self.caption_model = caption_model
@@ -630,7 +637,7 @@ class Agent:
                 question_preview=question[:200],
                 model=model_name,
                 orchestrator_model=model_name,
-                recursive_model=_model_label(self.sub_model),
+                recursive_model=_model_label(self.recursive_model),
                 audio_model=_model_label(self.audio_model) if self.audio_model else None,
                 video_path=video,
                 max_iterations=self.max_iterations,
@@ -783,7 +790,7 @@ class Agent:
         from rich.console import Console
         _console = Console()
 
-        child_model_name = _model_label(self.sub_model)
+        child_model_name = _model_label(self.recursive_model)
         with self._tracer.subcall(
             depth=depth,
             prompt=prompt,
@@ -975,8 +982,8 @@ class Agent:
                 )
 
                 child_orchestrator = LLMClient(
-                    model=self.sub_model,
-                    vision_model=self.vision_model or self.sub_model,
+                    model=self.recursive_model,
+                    vision_model=self.vision_model or self.recursive_model,
                     fallback_model=None,
                     name=f"child_rlm_d{depth}",
                 )
@@ -1074,6 +1081,7 @@ class Agent:
 
         model_name = _model_label(self.model)
         sub_model_name = _model_label(self.sub_model)
+        recursive_model_name = _model_label(self.recursive_model)
         vision_label = _model_label(self.vision_model) if self.vision_model else sub_model_name
         audio_label = _model_label(self.audio_model) if self.audio_model else None
 
@@ -1083,6 +1091,7 @@ class Agent:
             "question": question,
             "model": model_name,
             "sub_model": sub_model_name,
+            "recursive_model": recursive_model_name,
             "vision_model": vision_label,
             "audio_model": audio_label,
             "status": "error" if error is not None else "complete",

@@ -11,8 +11,8 @@ import pytest
 
 from sanjaya import Agent
 from sanjaya.prompts import PromptConfig
-from sanjaya.tracing.tracer import Tracer
 from sanjaya.tools.video.toolkit import VideoToolkit
+from sanjaya.tracing.tracer import Tracer
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / "api") not in sys.path:
@@ -228,6 +228,7 @@ def test_agent_defaults_and_api_contract():
 
     assert agent.model == "google-vertex:gemini-3.1-pro-preview"
     assert agent.sub_model == "google-vertex:gemini-3-flash-preview"
+    assert agent.recursive_model == "google-vertex:gemini-3-flash-preview"
     assert agent.vision_model == "google-vertex:gemini-3.1-pro-preview"
     assert agent.audio_model == "google-vertex:gemini-3-flash-preview"
     assert agent.fallback_model is None
@@ -256,8 +257,66 @@ def test_agent_binds_video_inspection_to_root_model() -> None:
     assert agent._orchestrator.vision_model == "vision-model"
 
 
+def test_recursive_model_controls_child_rlm_orchestrator(monkeypatch: pytest.MonkeyPatch) -> None:
+    from sanjaya.core.loop import LoopResult
+
+    agent = Agent(
+        model="root-model",
+        sub_model="direct-sub-model",
+        recursive_model="child-rlm-model",
+        vision_model=None,
+        audio_model=None,
+        caption_model=None,
+        critic_model=None,
+        max_depth=2,
+        tracing=False,
+    )
+    assert agent._sub_llm.model == "direct-sub-model"
+
+    captured: dict[str, Any] = {}
+
+    class FakeLLMClient:
+        def __init__(
+            self,
+            model: str,
+            vision_model: str | None = None,
+            fallback_model: str | None = None,
+            name: str = "llm",
+        ):
+            self.model = model
+            self.vision_model = vision_model or model
+            self.fallback_model = fallback_model
+            self.name = name
+
+    def fake_run_loop(**kwargs: Any) -> LoopResult:
+        captured["orchestrator_model"] = kwargs["orchestrator"].model
+        captured["orchestrator_vision_model"] = kwargs["orchestrator"].vision_model
+        return LoopResult(
+            raw_answer={"answer": "child ok"},
+            iterations_used=1,
+            messages=[],
+            budget=kwargs["budget"],
+            wall_time_s=0.1,
+        )
+
+    monkeypatch.setattr("sanjaya.agent.LLMClient", FakeLLMClient)
+    monkeypatch.setattr("sanjaya.agent.run_loop", fake_run_loop)
+
+    result = agent._subcall(
+        "Inspect the child task.",
+        depth=1,
+        parent_run_registry=agent._build_runtime_registry(),
+    )
+
+    assert result == "child ok"
+    assert captured == {
+        "orchestrator_model": "child-rlm-model",
+        "orchestrator_vision_model": "child-rlm-model",
+    }
+
+
 def test_prompt_mentions_context_rot_and_batched_slice_docs():
-    from sanjaya.core.prompts import _CORE_INSTRUCTIONS_RECURSIVE
+    from sanjaya.core.prompts import _CORE_INSTRUCTIONS, _CORE_INSTRUCTIONS_RECURSIVE
 
     assert "avoid context rot" in _CORE_INSTRUCTIONS_RECURSIVE.lower()
     assert "promptless" in _CORE_INSTRUCTIONS_RECURSIVE
@@ -265,6 +324,8 @@ def test_prompt_mentions_context_rot_and_batched_slice_docs():
     assert "rlm_query_batched" in _CORE_INSTRUCTIONS_RECURSIVE
     assert "start_s" in _CORE_INSTRUCTIONS_RECURSIVE
     assert "end_s" in _CORE_INSTRUCTIONS_RECURSIVE
+    assert "the question may not be answerable" in _CORE_INSTRUCTIONS
+    assert "the question may not be answerable" in _CORE_INSTRUCTIONS_RECURSIVE
 
 
 def test_promptless_inspect_video_is_consumed_by_next_root_turn(
@@ -399,8 +460,9 @@ def test_incomplete_video_run_persists_partial_trace(
 
 
 def test_recursive_subcall_trace_event_is_persisted() -> None:
-    from sanjaya.tracing.tracer import Tracer
     from sanjaya_api.trace_events import normalize_trace_event
+
+    from sanjaya.tracing.tracer import Tracer
 
     tracer = Tracer(enabled=False, track_events=True)
 

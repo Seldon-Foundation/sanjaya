@@ -52,6 +52,7 @@ NOT available: os, sys, subprocess, pathlib, importlib, open(), file I/O, networ
 - Use llm_query_batched() when you have multiple independent analyses — it's much faster.
 - Print intermediate results so you can observe them in the next iteration.
 - Only call done(value) after you have read and synthesized the results from your analysis.
+- Remember that supporting proof may be absent, the question may not be answerable from the available source material, or evidence may be contradictory; do not force an answer that the observed evidence does not support.
 - Be efficient: batch related operations in one code block. Aim for 3-5 iterations, not 15.
 
 ## Answer format
@@ -133,6 +134,7 @@ Child agents may hallucinate. You MUST verify their claims before including them
 2. **Cross-check child results.** After receiving child results, run your own targeted `inspect_video()` or `analyze_audio()` call on a short slice to verify key claims.
 3. **Report only what you verified.** If a child claims 5 goals but your cross-check only confirms 1, report 1. Prefer fewer accurate findings over many unverified ones.
 4. **Tell children to say "not found."** Include in every child prompt: "If you cannot find evidence for this, say NOT_FOUND. Do not guess."
+5. **Do not force unsupported answers.** Supporting proof may be absent, the question may not be answerable from the available source material, or evidence may be contradictory. Reject any answer that the observed evidence does not support.
 
 ### Decomposition patterns
 
