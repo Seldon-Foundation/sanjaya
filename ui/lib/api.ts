@@ -6,7 +6,9 @@ import type {
   BenchmarkPromptTraceResponse,
   BenchmarkData,
   MMOUCatalog,
+  MMOUEvaluationSummary,
   MMOUJobSummary,
+  MMOUQuestionEvaluationSummary,
   MMOUQuestionTraceResponse,
   TraceEvent,
 } from "./types";
@@ -503,6 +505,32 @@ export async function resumeMMOUJob(jobId: string): Promise<MMOUJobSummary> {
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.detail || `Failed to resume MMOU job: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function evaluateMMOUJob(jobId: string): Promise<MMOUEvaluationSummary> {
+  const res = await fetch(`${API_BASE}/mmou-jobs/${encodeURIComponent(jobId)}/evaluate`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || `Failed to score MMOU job: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function evaluateMMOUQuestion(
+  jobId: string,
+  questionId: string
+): Promise<MMOUQuestionEvaluationSummary> {
+  const res = await fetch(
+    `${API_BASE}/mmou-jobs/${encodeURIComponent(jobId)}/questions/${encodeURIComponent(questionId)}/evaluate`,
+    { method: "POST" }
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || `Failed to score MMOU question: ${res.status}`);
   }
   return res.json();
 }

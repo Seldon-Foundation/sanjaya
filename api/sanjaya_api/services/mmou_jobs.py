@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -34,8 +35,10 @@ from sanjaya.model_defaults import DEFAULT_AUDIO_MODEL, DEFAULT_ROOT_MODEL, DEFA
 
 from sanjaya_api.models import (
     MMOUCatalogResponse,
+    MMOUEvaluationSummary,
     MMOUJobCreateRequest,
     MMOUJobSummary,
+    MMOUQuestionEvaluationSummary,
     MMOUQuestionStatus,
 )
 from sanjaya_api.trace_events import normalize_trace_event
@@ -57,10 +60,13 @@ def _load_mmou_benchmark_api_cached(benchmarks_dir: str) -> SimpleNamespace:
 
     from videobench.benchmarks.mmou import (
         MMOU_DATASET_FILE,
+        MMOU_EVAL_SPACE,
         MMOUSample,
         build_mmou_prompt,
         download_mmou_metadata,
         download_remote_video,
+        evaluate_submission_with_api,
+        export_submission_from_predictions,
         load_mmou_dataset,
         mmou_domain_counts,
         parse_answer_letter,
@@ -74,12 +80,15 @@ def _load_mmou_benchmark_api_cached(benchmarks_dir: str) -> SimpleNamespace:
         build_mmou_prompt=build_mmou_prompt,
         download_mmou_metadata=download_mmou_metadata,
         download_remote_video=download_remote_video,
+        evaluate_submission_with_api=evaluate_submission_with_api,
+        export_submission_from_predictions=export_submission_from_predictions,
         GenerationRequest=GenerationRequest,
         load_config=load_config,
         load_mmou_dataset=load_mmou_dataset,
         MediaInput=MediaInput,
         MediaType=MediaType,
         mmou_domain_counts=mmou_domain_counts,
+        MMOU_EVAL_SPACE=MMOU_EVAL_SPACE,
         parse_answer_letter=parse_answer_letter,
     )
 
@@ -239,6 +248,112 @@ def _is_completed_prediction(row: dict[str, Any]) -> bool:
     return bool(row.get("question_id")) and isinstance(answer, str) and bool(answer.strip())
 
 
+def _coerce_int(value: Any) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        cleaned = value.strip().replace(",", "")
+        if cleaned.isdigit():
+            return int(cleaned)
+    return None
+
+
+def _coerce_float(value: Any) -> float | None:
+    if isinstance(value, int | float):
+        return float(value)
+    if isinstance(value, str):
+        cleaned = value.strip().replace("%", "").replace(",", "")
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
+    return None
+
+
+def _find_evaluator_overall_row(evaluation: dict[str, Any]) -> dict[str, Any] | None:
+    duration = evaluation.get("duration_breakdown")
+    if not isinstance(duration, dict):
+        return None
+    headers = [str(header).strip().lower() for header in duration.get("headers") or []]
+    rows = duration.get("data") or []
+    if not headers or not isinstance(rows, list):
+        return None
+    for row in rows:
+        if not isinstance(row, list) or not row:
+            continue
+        if str(row[0]).strip().lower() != "overall":
+            continue
+        values = {headers[index]: row[index] for index in range(min(len(headers), len(row)))}
+        accuracy = _coerce_float(values.get("answered accuracy (%)"))
+        correct = _coerce_int(values.get("correct"))
+        answered = _coerce_int(values.get("answered"))
+        if accuracy is None or correct is None or answered is None:
+            return None
+        return {
+            "answered_accuracy_pct": accuracy,
+            "correct": correct,
+            "answered": answered,
+        }
+    return None
+
+
+def _parse_evaluator_markdown(evaluation: dict[str, Any]) -> dict[str, Any] | None:
+    for markdown in evaluation.get("markdown_outputs") or []:
+        if not isinstance(markdown, str) or "Answered accuracy" not in markdown:
+            continue
+        match = re.search(
+            r"Answered accuracy:\s*`?([0-9.]+)%`?\s*\(`?(\d+)\s*/\s*(\d+)`?\)",
+            markdown,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            return {
+                "answered_accuracy_pct": float(match.group(1)),
+                "correct": int(match.group(2)),
+                "answered": int(match.group(3)),
+            }
+    return None
+
+
+def _compact_evaluation_summary(evaluation: dict[str, Any], *, submission_rows: int) -> MMOUEvaluationSummary:
+    parsed = _find_evaluator_overall_row(evaluation) or _parse_evaluator_markdown(evaluation)
+    if parsed is None:
+        raise ValueError("Could not parse answered accuracy from MMOU evaluator response.")
+    return MMOUEvaluationSummary(
+        answered_accuracy_pct=float(parsed["answered_accuracy_pct"]),
+        correct=int(parsed["correct"]),
+        answered=int(parsed["answered"]),
+        evaluated_at=str(evaluation.get("evaluated_at") or datetime.now(timezone.utc).isoformat()),
+        submission_rows=submission_rows,
+    )
+
+
+def _compact_question_evaluation_summary(
+    question_id: str,
+    answer: str,
+    evaluation: dict[str, Any],
+    *,
+    submission_rows: int,
+) -> MMOUQuestionEvaluationSummary:
+    parsed = _find_evaluator_overall_row(evaluation) or _parse_evaluator_markdown(evaluation)
+    if parsed is None:
+        raise ValueError("Could not parse answered accuracy from MMOU evaluator response.")
+    correct = int(parsed["correct"])
+    answered = int(parsed["answered"])
+    if answered < 1:
+        raise ValueError("MMOU evaluator did not score the answered question.")
+    return MMOUQuestionEvaluationSummary(
+        question_id=question_id,
+        answer=answer,
+        correct=correct > 0,
+        answered_accuracy_pct=float(parsed["answered_accuracy_pct"]),
+        evaluated_at=str(evaluation.get("evaluated_at") or datetime.now(timezone.utc).isoformat()),
+        submission_rows=submission_rows,
+    )
+
+
 def _prediction_row(
     question: "MMOUQuestionRecord",
     *,
@@ -357,7 +472,7 @@ class MMOUBenchmarkJobService:
                 "limit": 10,
                 "stratified": True,
                 "workers": 1,
-                "max_iterations": 8,
+                "max_iterations": 20,
                 "max_depth": 2,
                 "max_budget_usd": None,
                 "max_timeout_s": None,
@@ -517,6 +632,120 @@ class MMOUBenchmarkJobService:
             else:
                 events = []
             return question.run_id, events
+
+    def evaluate_job(self, job_id: str) -> MMOUEvaluationSummary | None:
+        with self._lock:
+            record = self._jobs.get(job_id)
+            if record is None:
+                return None
+
+            rows = _read_jsonl(Path(record.job_dir) / "records" / "predictions.jsonl")
+            ready_rows = [row for row in rows if _is_completed_prediction(row)]
+            if not ready_rows:
+                raise ValueError("No answered MMOU predictions are available to score yet.")
+
+            api = load_mmou_benchmark_api(record.request.benchmarks_dir)
+            job_dir = Path(record.job_dir)
+            records_dir = job_dir / "records"
+            submissions_dir = job_dir / "submissions"
+            judge_dir = job_dir / "judge"
+            records_dir.mkdir(parents=True, exist_ok=True)
+            submissions_dir.mkdir(parents=True, exist_ok=True)
+            judge_dir.mkdir(parents=True, exist_ok=True)
+
+            snapshot_path = records_dir / "predictions_answered_current.jsonl"
+            _write_jsonl(snapshot_path, ready_rows)
+            exported = api.export_submission_from_predictions(
+                snapshot_path,
+                submissions_dir,
+                stem=f"{_safe_name(record.run_name)}-answered-current",
+            )
+            submission_file = Path(exported["json_path"])
+            submission_rows = int(exported.get("rows") or len(ready_rows))
+
+        evaluation = api.evaluate_submission_with_api(
+            submission_file=submission_file,
+            output_dir=judge_dir,
+            evaluator_space=api.MMOU_EVAL_SPACE,
+            hf_token=os.getenv("HF_TOKEN") or None,
+        )
+        summary = _compact_evaluation_summary(evaluation, submission_rows=submission_rows)
+
+        with self._lock:
+            current = self._jobs.get(job_id)
+            if current is not None:
+                summary_path = Path(current.job_dir) / "judge" / "mmou_eval_summary.json"
+                summary_path.parent.mkdir(parents=True, exist_ok=True)
+                summary_path.write_text(summary.model_dump_json(indent=2), encoding="utf-8")
+                self._touch(
+                    current,
+                    stdout=f"Scored {summary.answered} answered MMOU question(s): {summary.answered_accuracy_pct:.1f}%.",
+                )
+                self._persist_record(current)
+        return summary
+
+    def evaluate_question(self, job_id: str, question_id: str) -> MMOUQuestionEvaluationSummary | None:
+        with self._lock:
+            record = self._jobs.get(job_id)
+            if record is None:
+                return None
+            if question_id not in record.questions:
+                return None
+
+            rows = _read_jsonl(Path(record.job_dir) / "records" / "predictions.jsonl")
+            ready_rows = [
+                row
+                for row in rows
+                if str(row.get("question_id") or "") == question_id and _is_completed_prediction(row)
+            ]
+            if not ready_rows:
+                raise ValueError(f"No answered MMOU prediction is available for question {question_id}.")
+
+            row = ready_rows[-1]
+            answer = str(row["answer"]).strip()
+            api = load_mmou_benchmark_api(record.request.benchmarks_dir)
+            job_dir = Path(record.job_dir)
+            records_dir = job_dir / "records"
+            submissions_dir = job_dir / "submissions"
+            judge_dir = job_dir / "judge"
+            records_dir.mkdir(parents=True, exist_ok=True)
+            submissions_dir.mkdir(parents=True, exist_ok=True)
+            judge_dir.mkdir(parents=True, exist_ok=True)
+
+            safe_question_id = _safe_name(question_id)
+            snapshot_path = records_dir / f"prediction_{safe_question_id}_current.jsonl"
+            _write_jsonl(snapshot_path, [row])
+            exported = api.export_submission_from_predictions(
+                snapshot_path,
+                submissions_dir,
+                stem=f"{_safe_name(record.run_name)}-{safe_question_id}-current",
+            )
+            submission_file = Path(exported["json_path"])
+            submission_rows = int(exported.get("rows") or 1)
+
+        evaluation = api.evaluate_submission_with_api(
+            submission_file=submission_file,
+            output_dir=judge_dir,
+            evaluator_space=api.MMOU_EVAL_SPACE,
+            hf_token=os.getenv("HF_TOKEN") or None,
+        )
+        summary = _compact_question_evaluation_summary(
+            question_id,
+            answer,
+            evaluation,
+            submission_rows=submission_rows,
+        )
+
+        with self._lock:
+            current = self._jobs.get(job_id)
+            if current is not None:
+                summary_path = Path(current.job_dir) / "judge" / "questions" / f"{_safe_name(question_id)}.json"
+                summary_path.parent.mkdir(parents=True, exist_ok=True)
+                summary_path.write_text(summary.model_dump_json(indent=2), encoding="utf-8")
+                verdict = "correct" if summary.correct else "incorrect"
+                self._touch(current, stdout=f"Scored MMOU question {question_id}: {verdict}.")
+                self._persist_record(current)
+        return summary
 
     def _run_job(self, record: MMOUJobRecord) -> None:
         with self._lock:
@@ -785,7 +1014,7 @@ class MMOUBenchmarkJobService:
         if stderr:
             record.stderr_tail.append(stderr)
 
-    def _serialize_question(self, question: MMOUQuestionRecord) -> MMOUQuestionStatus:
+    def _serialize_question(self, record: MMOUJobRecord, question: MMOUQuestionRecord) -> MMOUQuestionStatus:
         trace_count = len(question.trace_events)
         if question.tracer is not None:
             trace_count = len(question.tracer.events)
@@ -813,10 +1042,11 @@ class MMOUBenchmarkJobService:
             cost_usd=question.cost_usd,
             wall_time_s=question.wall_time_s,
             error=question.error,
+            latest_evaluation=self._load_latest_question_evaluation(record, question),
         )
 
     def _serialize_job(self, record: MMOUJobRecord) -> MMOUJobSummary:
-        questions = [self._serialize_question(record.questions[question_id]) for question_id in record.question_ids]
+        questions = [self._serialize_question(record, record.questions[question_id]) for question_id in record.question_ids]
         completed = sum(1 for question in questions if question.status == "complete")
         errors = sum(1 for question in questions if question.status == "error")
         active = [question.question_id for question in questions if question.status == "running"]
@@ -851,10 +1081,36 @@ class MMOUBenchmarkJobService:
             stdout_tail=list(record.stdout_tail),
             stderr_tail=list(record.stderr_tail),
             revision=record.revision,
+            latest_evaluation=self._load_latest_evaluation(record),
         )
 
+    def _load_latest_evaluation(self, record: MMOUJobRecord) -> MMOUEvaluationSummary | None:
+        payload = _read_json(Path(record.job_dir) / "judge" / "mmou_eval_summary.json", None)
+        if not isinstance(payload, dict):
+            return None
+        try:
+            return MMOUEvaluationSummary(**payload)
+        except Exception:
+            return None
+
+    def _load_latest_question_evaluation(
+        self,
+        record: MMOUJobRecord,
+        question: MMOUQuestionRecord,
+    ) -> MMOUQuestionEvaluationSummary | None:
+        payload = _read_json(
+            Path(record.job_dir) / "judge" / "questions" / f"{_safe_name(question.question_id)}.json",
+            None,
+        )
+        if not isinstance(payload, dict):
+            return None
+        try:
+            return MMOUQuestionEvaluationSummary(**payload)
+        except Exception:
+            return None
+
     def _ensure_layout(self, job_dir: Path) -> None:
-        for child in (job_dir, job_dir / "records", job_dir / "traces"):
+        for child in (job_dir, job_dir / "records", job_dir / "traces", job_dir / "submissions", job_dir / "judge"):
             child.mkdir(parents=True, exist_ok=True)
 
     def _resolve_job_output_dir(self, output_dir: str | None) -> Path:

@@ -4,6 +4,8 @@ import type { ChangeEvent, FormEvent, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   createMMOUJob,
+  evaluateMMOUJob,
+  evaluateMMOUQuestion,
   fetchMMOUCatalog,
   fetchMMOUJobs,
   fetchMMOUQuestionTrace,
@@ -11,7 +13,13 @@ import {
   stopMMOUJob,
   streamMMOUJobEvents,
 } from "@/lib/api";
-import type { MMOUCatalog, MMOUJobSummary, TraceEvent } from "@/lib/types";
+import type {
+  MMOUEvaluationSummary,
+  MMOUCatalog,
+  MMOUJobSummary,
+  MMOUQuestionEvaluationSummary,
+  TraceEvent,
+} from "@/lib/types";
 import { TraceTimeline } from "@/components/hud/trace-timeline";
 
 interface MMOUFormState {
@@ -51,6 +59,16 @@ function shortModel(model: string | null | undefined): string {
   if (!model) return "—";
   const parts = model.split("/");
   return parts[parts.length - 1];
+}
+
+function formatEvaluation(summary: MMOUEvaluationSummary | null): string | null {
+  if (!summary) return null;
+  return `${summary.answered_accuracy_pct.toFixed(1)}% (${summary.correct}/${summary.answered})`;
+}
+
+function formatQuestionEvaluation(summary: MMOUQuestionEvaluationSummary | null | undefined): string | null {
+  if (!summary) return null;
+  return summary.correct ? "Correct" : "Wrong";
 }
 
 function statusTone(status: MMOUJobSummary["status"] | "active") {
@@ -218,6 +236,10 @@ function MMOUJobCard({
   const [traceError, setTraceError] = useState<string | null>(null);
   const [stopPending, setStopPending] = useState(false);
   const [resumePending, setResumePending] = useState(false);
+  const [scorePending, setScorePending] = useState(false);
+  const [evaluation, setEvaluation] = useState<MMOUEvaluationSummary | null>(null);
+  const [questionEvaluations, setQuestionEvaluations] = useState<Record<string, MMOUQuestionEvaluationSummary>>({});
+  const [questionScorePending, setQuestionScorePending] = useState<Set<string>>(new Set());
   const seenKeysRef = useRef<Record<string, Set<string>>>({});
   const onSnapshotRef = useRef(onSnapshot);
   const selectedQuestionId = useMemo(
@@ -247,7 +269,7 @@ function MMOUJobCard({
   }, [expanded, job.job_id, selectedQuestionId]);
 
   useEffect(() => {
-    if (!expanded || (job.status !== "pending" && job.status !== "running" && job.status !== "stopping")) return;
+    if (job.status !== "pending" && job.status !== "running" && job.status !== "stopping") return;
     const stop = streamMMOUJobEvents(
       job.job_id,
       (snapshot) => {
@@ -257,6 +279,7 @@ function MMOUJobCard({
         }
       },
       (questionId, event) => {
+        if (!expanded) return;
         setTraceByQuestion((current) => {
           const seen = seenKeysRef.current[questionId] ?? new Set<string>();
           seenKeysRef.current[questionId] = seen;
@@ -281,6 +304,12 @@ function MMOUJobCard({
   const isResumable = !isStoppable && (job.status === "interrupted" || job.status === "stopped" || job.status === "error" || job.error_questions > 0);
   const resumeActionLabel = job.error_questions > 0 || job.status === "error" ? "Retry" : "Resume";
   const resumePendingLabel = resumeActionLabel === "Retry" ? "Retrying…" : "Resuming…";
+  const evaluationLabel = formatEvaluation(evaluation ?? job.latest_evaluation);
+  const canScore = job.completed_questions > 0;
+  const getQuestionEvaluation = (questionId: string): MMOUQuestionEvaluationSummary | null => {
+    const question = job.questions.find((item) => item.question_id === questionId);
+    return questionEvaluations[questionId] ?? question?.latest_evaluation ?? null;
+  };
 
   const handleStop = async () => {
     if (!isStoppable || stopPending || job.status === "stopping") return;
@@ -308,6 +337,40 @@ function MMOUJobCard({
       setTraceError(message);
     } finally {
       setResumePending(false);
+    }
+  };
+
+  const handleScore = async () => {
+    if (!canScore || scorePending) return;
+    setScorePending(true);
+    setTraceError(null);
+    try {
+      const summary = await evaluateMMOUJob(job.job_id);
+      setEvaluation(summary);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to score MMOU job";
+      setTraceError(message);
+    } finally {
+      setScorePending(false);
+    }
+  };
+
+  const handleQuestionScore = async (questionId: string) => {
+    if (questionScorePending.has(questionId)) return;
+    setQuestionScorePending((current) => new Set([...current, questionId]));
+    setTraceError(null);
+    try {
+      const summary = await evaluateMMOUQuestion(job.job_id, questionId);
+      setQuestionEvaluations((current) => ({ ...current, [questionId]: summary }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to score MMOU question";
+      setTraceError(message);
+    } finally {
+      setQuestionScorePending((current) => {
+        const next = new Set(current);
+        next.delete(questionId);
+        return next;
+      });
     }
   };
 
@@ -358,7 +421,24 @@ function MMOUJobCard({
                 : "Run stopped. Pending questions were not started."}
           </p>
         )}
+        {!expanded && traceError && (
+          <p className="mt-2 break-words text-[12px] text-hud-red">{traceError}</p>
+        )}
         <div className="mt-3 flex justify-end gap-2">
+          {evaluationLabel && (
+            <span className="border border-hud-cyan/40 bg-hud-cyan/10 px-2 py-1.5 text-[12px] font-bold text-hud-cyan">
+              Score {evaluationLabel}
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={handleScore}
+            disabled={scorePending || !canScore}
+            title={canScore ? "Score currently answered MMOU questions" : "No answered questions to score yet"}
+            className="border border-hud-cyan/50 px-3 py-1.5 text-[12px] font-bold uppercase tracking-[0.14em] text-hud-cyan transition-colors hover:bg-hud-cyan/10 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {scorePending ? "Scoring..." : "Score"}
+          </button>
           {isResumable && (
             <button
               type="button"
@@ -516,6 +596,29 @@ function MMOUJobCard({
                     </div>
                   </div>
                 </div>
+                {selectedQuestion.status === "complete" && selectedQuestion.answer && (
+                  <div className="mt-3 flex justify-end gap-2">
+                    {formatQuestionEvaluation(getQuestionEvaluation(selectedQuestion.question_id)) && (
+                      <span
+                        className={`border px-2 py-1.5 text-[12px] font-bold uppercase tracking-[0.14em] ${
+                          getQuestionEvaluation(selectedQuestion.question_id)?.correct
+                            ? "border-hud-green/40 bg-hud-green/10 text-hud-green"
+                            : "border-hud-red/40 bg-hud-red/10 text-hud-red"
+                        }`}
+                      >
+                        {formatQuestionEvaluation(getQuestionEvaluation(selectedQuestion.question_id))}
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => handleQuestionScore(selectedQuestion.question_id)}
+                      disabled={questionScorePending.has(selectedQuestion.question_id)}
+                      className="border border-hud-cyan/50 px-3 py-1.5 text-[12px] font-bold uppercase tracking-[0.14em] text-hud-cyan transition-colors hover:bg-hud-cyan/10 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {questionScorePending.has(selectedQuestion.question_id) ? "Checking..." : "Check Answer"}
+                    </button>
+                  </div>
+                )}
               </div>
 
               <div className="min-w-0 overflow-hidden">
@@ -548,7 +651,7 @@ export function MMOULauncher() {
     limit: 10,
     stratified: true,
     workers: 1,
-    maxIterations: 8,
+    maxIterations: 20,
     maxDepth: 2,
     maxBudgetUsd: "",
     maxTimeoutS: "",

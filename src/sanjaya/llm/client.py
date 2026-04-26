@@ -84,15 +84,79 @@ def _get_bg_loop() -> asyncio.AbstractEventLoop:
     return loop
 
 
-def _compute_cost(model_name: str, input_tokens: int, output_tokens: int) -> float | None:
+def _normalize_model_ref(model_name: str) -> str:
+    """Normalize provider-prefixed model strings to the provider model id."""
+    if ":" in model_name:
+        return model_name.split(":", 1)[1]
+    if model_name.startswith("google/"):
+        return model_name.split("/", 1)[1]
+    return model_name
+
+
+def _gemini3_cost(
+    model_name: str,
+    input_tokens: int,
+    output_tokens: int,
+    *,
+    input_modality_tokens: dict[str, int] | None = None,
+) -> float | None:
+    """Compute Gemini 3 standard Vertex/Google cost from current public rates.
+
+    Google bills Gemini 3 output as response + reasoning tokens. Gemini 3 Pro has
+    the same input rate for text/image/video/audio; Flash-family models charge
+    audio input separately when modality details are available.
+    """
+    model = _normalize_model_ref(model_name).lower()
+    long_context = input_tokens > 200_000
+
+    if model in {"gemini-3.1-pro-preview", "gemini-3-pro-preview"}:
+        input_rate = 4.0 if long_context else 2.0
+        output_rate = 18.0 if long_context else 12.0
+        return (input_tokens * input_rate + output_tokens * output_rate) / 1_000_000
+
+    if model == "gemini-3-flash-preview":
+        output_rate = 3.0
+        default_input_rate = 0.5
+        audio_input_rate = 1.0
+    elif model == "gemini-3.1-flash-lite-preview":
+        output_rate = 1.5
+        default_input_rate = 0.25
+        audio_input_rate = 0.5
+    else:
+        return None
+
+    input_cost = input_tokens * default_input_rate
+    if input_modality_tokens:
+        audio_tokens = input_modality_tokens.get("audio", 0)
+        non_audio_tokens = max(input_tokens - audio_tokens, 0)
+        input_cost = non_audio_tokens * default_input_rate + audio_tokens * audio_input_rate
+    return (input_cost + output_tokens * output_rate) / 1_000_000
+
+
+def _compute_cost(
+    model_name: str,
+    input_tokens: int,
+    output_tokens: int,
+    *,
+    input_modality_tokens: dict[str, int] | None = None,
+) -> float | None:
     """Compute cost from token counts using genai_prices."""
+    gemini_cost = _gemini3_cost(
+        model_name,
+        input_tokens,
+        output_tokens,
+        input_modality_tokens=input_modality_tokens,
+    )
+    if gemini_cost is not None:
+        return gemini_cost
+
     try:
         from genai_prices import calc_price
         from genai_prices.types import Usage
 
         usage = Usage(input_tokens=input_tokens, output_tokens=output_tokens)
         # Try model name as-is, strip provider prefix, strip date suffix
-        candidates = [model_name]
+        candidates = [model_name, _normalize_model_ref(model_name)]
         if "/" in model_name:
             base = model_name.split("/", 1)[1]
             candidates.append(base)
@@ -102,7 +166,7 @@ def _compute_cost(model_name: str, input_tokens: int, output_tokens: int) -> flo
             if stripped != base:
                 candidates.append(stripped)
 
-        for ref in candidates:
+        for ref in dict.fromkeys(candidates):
             for provider_id in ("openrouter", "openai", "anthropic", "google", "google-vertex", "vertex_ai"):
                 try:
                     result = calc_price(usage, model_ref=ref, provider_id=provider_id)
@@ -597,6 +661,60 @@ class LLMClient:
                 return None
         return usage_obj
 
+    def _usage_mapping(self, usage: Any) -> dict[str, Any]:
+        if isinstance(usage, dict):
+            return usage
+        if hasattr(usage, "__dict__"):
+            values = vars(usage)
+            if isinstance(values, dict):
+                return values
+        for method_name in ("model_dump", "dict"):
+            method = getattr(usage, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                dumped = method()
+            except TypeError:
+                continue
+            except Exception:
+                continue
+            if isinstance(dumped, dict):
+                return dumped
+        return {}
+
+    def _usage_int(self, usage: Any, mapping: dict[str, Any], *names: str) -> int:
+        for name in names:
+            value = mapping.get(name)
+            if value is None:
+                value = getattr(usage, name, None)
+            if value is None:
+                continue
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                continue
+        return 0
+
+    def _usage_modality_tokens(self, details: Any) -> dict[str, int] | None:
+        if not isinstance(details, list):
+            return None
+        totals: dict[str, int] = {}
+        for item in details:
+            if isinstance(item, dict):
+                modality = item.get("modality")
+                token_count = item.get("token_count")
+            else:
+                modality = getattr(item, "modality", None)
+                token_count = getattr(item, "token_count", None)
+            if modality is None or token_count is None:
+                continue
+            key = str(modality).lower()
+            try:
+                totals[key] = totals.get(key, 0) + int(token_count or 0)
+            except (TypeError, ValueError):
+                continue
+        return totals or None
+
     def _capture_usage(self, result: Any) -> UsageSnapshot:
         usage = self._resolve_usage(getattr(result, "usage", None))
         if usage is None:
@@ -608,14 +726,24 @@ class LLMClient:
             self.last_usage = snap
             return snap
 
-        input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
-        output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
-        total_tokens = int(getattr(usage, "total_tokens", 0) or (input_tokens + output_tokens))
+        usage_map = self._usage_mapping(usage)
+        input_tokens = self._usage_int(usage, usage_map, "input_tokens", "prompt_token_count", "request_tokens")
+        candidate_tokens = self._usage_int(usage, usage_map, "candidates_token_count", "completion_tokens")
+        reasoning_tokens = self._usage_int(usage, usage_map, "thoughts_token_count", "reasoning_tokens")
+        output_tokens = self._usage_int(usage, usage_map, "output_tokens", "response_tokens")
+        if candidate_tokens or reasoning_tokens:
+            output_tokens = candidate_tokens + reasoning_tokens
+        total_tokens = self._usage_int(usage, usage_map, "total_tokens", "total_token_count")
+        if not total_tokens:
+            total_tokens = input_tokens + output_tokens
+        input_modality_tokens = self._usage_modality_tokens(usage_map.get("prompt_tokens_details"))
 
         snap = UsageSnapshot(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             total_tokens=total_tokens,
+            reasoning_tokens=reasoning_tokens,
+            input_modality_tokens=input_modality_tokens,
         )
         self.last_usage = snap
         return snap
@@ -624,6 +752,17 @@ class LLMClient:
         response = getattr(result, "response", None)
         if response is None:
             return None
+        model_name = getattr(response, "model_name", None) if response else None
+
+        if self.last_usage and model_name and (self.last_usage.input_tokens or self.last_usage.output_tokens):
+            gemini_cost = _gemini3_cost(
+                model_name,
+                self.last_usage.input_tokens,
+                self.last_usage.output_tokens,
+                input_modality_tokens=self.last_usage.input_modality_tokens,
+            )
+            if gemini_cost is not None:
+                return gemini_cost
 
         provider_details = getattr(response, "provider_details", None)
         if isinstance(provider_details, dict):
@@ -646,9 +785,13 @@ class LLMClient:
 
         # Fallback: compute cost from token counts using genai_prices
         if self.last_usage and (self.last_usage.input_tokens or self.last_usage.output_tokens):
-            model_name = getattr(response, "model_name", None) if response else None
             if model_name:
-                cost = _compute_cost(model_name, self.last_usage.input_tokens, self.last_usage.output_tokens)
+                cost = _compute_cost(
+                    model_name,
+                    self.last_usage.input_tokens,
+                    self.last_usage.output_tokens,
+                    input_modality_tokens=self.last_usage.input_modality_tokens,
+                )
                 if cost is not None:
                     return cost
 

@@ -11,8 +11,10 @@ from sse_starlette.sse import EventSourceResponse
 
 from sanjaya_api.models import (
     MMOUCatalogResponse,
+    MMOUEvaluationSummary,
     MMOUJobCreateRequest,
     MMOUJobSummary,
+    MMOUQuestionEvaluationSummary,
     MMOUQuestionTraceResponse,
 )
 from sanjaya_api.services.mmou_jobs import MMOUBenchmarkJobService
@@ -75,6 +77,37 @@ async def resume_mmou_job(job_id: str) -> MMOUJobSummary:
     if job is None:
         raise HTTPException(status_code=404, detail=f"MMOU job {job_id} not found")
     return job
+
+
+@router.post("/mmou-jobs/{job_id}/evaluate", response_model=MMOUEvaluationSummary)
+async def evaluate_mmou_job(job_id: str) -> MMOUEvaluationSummary:
+    """Submit currently answered MMOU predictions to the official evaluator."""
+    try:
+        result = _mmou_jobs.evaluate_job(job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (FileNotFoundError, RuntimeError) as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"MMOU job {job_id} not found")
+    return result
+
+
+@router.post(
+    "/mmou-jobs/{job_id}/questions/{question_id}/evaluate",
+    response_model=MMOUQuestionEvaluationSummary,
+)
+async def evaluate_mmou_question(job_id: str, question_id: str) -> MMOUQuestionEvaluationSummary:
+    """Submit one answered MMOU prediction to the official evaluator."""
+    try:
+        result = _mmou_jobs.evaluate_question(job_id, question_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (FileNotFoundError, RuntimeError) as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"MMOU question {question_id} not found")
+    return result
 
 
 @router.get("/mmou-jobs/{job_id}/questions/{question_id}/trace", response_model=MMOUQuestionTraceResponse)

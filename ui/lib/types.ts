@@ -311,6 +311,24 @@ export interface MMOUJobQuestion {
   cost_usd: number | null;
   wall_time_s: number | null;
   error: string | null;
+  latest_evaluation: MMOUQuestionEvaluationSummary | null;
+}
+
+export interface MMOUEvaluationSummary {
+  answered_accuracy_pct: number;
+  correct: number;
+  answered: number;
+  evaluated_at: string;
+  submission_rows: number;
+}
+
+export interface MMOUQuestionEvaluationSummary {
+  question_id: string;
+  answer: string;
+  correct: boolean;
+  answered_accuracy_pct: number;
+  evaluated_at: string;
+  submission_rows: number;
 }
 
 export interface MMOUJobSummary {
@@ -345,6 +363,7 @@ export interface MMOUJobSummary {
   stdout_tail: string[];
   stderr_tail: string[];
   revision: number;
+  latest_evaluation: MMOUEvaluationSummary | null;
 }
 
 export interface MMOUQuestionTraceResponse {

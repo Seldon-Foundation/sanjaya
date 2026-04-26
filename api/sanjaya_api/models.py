@@ -161,7 +161,7 @@ class MMOUJobCreateRequest(BaseModel):
     domains: list[str] | None = None
     question_ids: list[str] | None = None
     workers: int = Field(default=1, ge=1, le=16)
-    max_iterations: int = Field(default=8, ge=1, le=100)
+    max_iterations: int = Field(default=20, ge=1, le=100)
     max_depth: int = Field(default=2, ge=1, le=8)
     max_budget_usd: float | None = Field(default=None, gt=0)
     max_timeout_s: float | None = Field(default=None, gt=0)
@@ -170,6 +170,17 @@ class MMOUJobCreateRequest(BaseModel):
     keep_artifacts: bool = False
     benchmarks_dir: str | None = None
     dataset_file: str | None = None
+
+
+class MMOUQuestionEvaluationSummary(BaseModel):
+    """Compact MMOU evaluator result for one answered question."""
+
+    question_id: str
+    answer: str
+    correct: bool
+    answered_accuracy_pct: float
+    evaluated_at: str
+    submission_rows: int
 
 
 class MMOUQuestionStatus(BaseModel):
@@ -198,6 +209,17 @@ class MMOUQuestionStatus(BaseModel):
     cost_usd: float | None = None
     wall_time_s: float | None = None
     error: str | None = None
+    latest_evaluation: MMOUQuestionEvaluationSummary | None = None
+
+
+class MMOUEvaluationSummary(BaseModel):
+    """Compact MMOU evaluator result for answered questions only."""
+
+    answered_accuracy_pct: float
+    correct: int
+    answered: int
+    evaluated_at: str
+    submission_rows: int
 
 
 class MMOUJobSummary(BaseModel):
@@ -234,6 +256,7 @@ class MMOUJobSummary(BaseModel):
     stdout_tail: list[str]
     stderr_tail: list[str]
     revision: int
+    latest_evaluation: MMOUEvaluationSummary | None = None
 
 
 class MMOUQuestionTraceResponse(BaseModel):

@@ -127,14 +127,67 @@ def fake_api(samples: list[FakeSample], tmp_path: Path):
         downloaded_dirs.append(destination_dir)
         return path
 
+    def export_submission_from_predictions(predictions_path: Path, output_dir: Path, stem: str):
+        rows = [
+            json.loads(line)
+            for line in predictions_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        ready = [
+            {"question_id": row["question_id"], "answer": row["answer"]}
+            for row in rows
+            if row.get("question_id") and row.get("answer")
+        ]
+        output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = output_dir / f"{stem}.json"
+        jsonl_path = output_dir / f"{stem}.jsonl"
+        json_path.write_text(json.dumps(ready), encoding="utf-8")
+        jsonl_path.write_text("\n".join(json.dumps(row) for row in ready), encoding="utf-8")
+        exported_submissions.append(ready)
+        return {"json_path": str(json_path), "jsonl_path": str(jsonl_path), "rows": len(ready)}
+
+    def evaluate_submission_with_api(submission_file: Path, output_dir: Path, evaluator_space: str, hf_token=None):
+        submitted = json.loads(submission_file.read_text(encoding="utf-8"))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "evaluator_space": evaluator_space,
+            "evaluated_at": "2026-04-26T00:00:00+00:00",
+            "submission_file": str(submission_file),
+            "markdown_outputs": [
+                "### Metrics\n- Official accuracy: `0.01%` (`1 / 15000`)\n- Answered accuracy: `50.00%` (`1 / 2`)"
+            ],
+            "domain_breakdown": {"headers": [], "data": [], "metadata": None},
+            "duration_breakdown": {
+                "headers": [
+                    "Duration Bucket",
+                    "Official Accuracy (%)",
+                    "Answered Accuracy (%)",
+                    "Coverage (%)",
+                    "Correct",
+                    "Answered",
+                    "Total",
+                ],
+                "data": [["Overall", 0.01, 50.0, 0.02, 1, len(submitted), 15000]],
+                "metadata": None,
+            },
+            "skill_breakdown": {"headers": [], "data": [], "metadata": None},
+        }
+        (output_dir / "mmou_eval_result.json").write_text(json.dumps(payload), encoding="utf-8")
+        return payload
+
     downloaded_dirs: list[Path] = []
+    exported_submissions: list[list[dict[str, str]]] = []
     api = SimpleNamespace(
         MMOU_DATASET_FILE="MMOU.json",
+        MMOU_EVAL_SPACE="nvidia/MMOU-Eval",
         MMOUSample=FakeSample,
         build_mmou_prompt=lambda sample: f"Prompt {sample.question_id}",
         download_mmou_metadata=lambda dataset_root, include_captions=False: None,
         download_remote_video=download_remote_video,
         downloaded_dirs=downloaded_dirs,
+        evaluate_submission_with_api=evaluate_submission_with_api,
+        exported_submissions=exported_submissions,
+        export_submission_from_predictions=export_submission_from_predictions,
         GenerationRequest=FakeGenerationRequest,
         load_config=lambda _config, cwd: SimpleNamespace(storage=SimpleNamespace(data_dir=tmp_path / "data")),
         load_mmou_dataset=lambda _path: samples,
@@ -254,6 +307,120 @@ def test_resume_skips_completed_predictions(
     assert resumed.status == "pending"
     assert resumed.questions[0].status == "complete"
     assert resumed.questions[1].status == "pending"
+
+
+def test_evaluate_job_scores_only_answered_predictions_and_persists_summary(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_api,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(mmou_jobs, "load_mmou_benchmark_api", lambda _benchmarks_dir=None: fake_api)
+    monkeypatch.setattr(mmou_jobs.threading, "Thread", FakeThread)
+
+    service = MMOUBenchmarkJobService(output_root=tmp_path)
+    created = service.start_job(MMOUJobCreateRequest(limit=3, stratified=False))
+    record = service.get_job_record(created.job_id)
+    assert record is not None
+    first = record.questions[record.question_ids[0]]
+    second = record.questions[record.question_ids[1]]
+    first.prediction_row = {"question_id": first.question_id, "answer": "A"}
+    second.prediction_row = {"question_id": second.question_id, "answer": "B"}
+    record.questions[record.question_ids[2]].prediction_row = {
+        "question_id": record.question_ids[2],
+        "answer": None,
+        "error": "not answered",
+    }
+    record.status = "running"
+    service._persist_predictions(record)
+
+    summary = service.evaluate_job(created.job_id)
+
+    assert summary is not None
+    assert summary.answered_accuracy_pct == 50.0
+    assert summary.correct == 1
+    assert summary.answered == 2
+    assert summary.submission_rows == 2
+    assert fake_api.exported_submissions == [[
+        {"question_id": first.question_id, "answer": "A"},
+        {"question_id": second.question_id, "answer": "B"},
+    ]]
+    persisted = json.loads(Path(record.job_dir, "judge", "mmou_eval_summary.json").read_text(encoding="utf-8"))
+    assert persisted["answered_accuracy_pct"] == 50.0
+
+    rehydrated = MMOUBenchmarkJobService(output_root=tmp_path)
+    jobs = rehydrated.list_jobs()
+    assert jobs[0].latest_evaluation is not None
+    assert jobs[0].latest_evaluation.answered == 2
+
+
+def test_evaluate_job_rejects_empty_answered_predictions(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_api,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(mmou_jobs, "load_mmou_benchmark_api", lambda _benchmarks_dir=None: fake_api)
+    monkeypatch.setattr(mmou_jobs.threading, "Thread", FakeThread)
+
+    service = MMOUBenchmarkJobService(output_root=tmp_path)
+    created = service.start_job(MMOUJobCreateRequest(limit=1, stratified=False))
+
+    with pytest.raises(ValueError, match="No answered MMOU predictions"):
+        service.evaluate_job(created.job_id)
+
+
+def test_evaluate_question_scores_one_answer_and_persists_summary(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_api,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(mmou_jobs, "load_mmou_benchmark_api", lambda _benchmarks_dir=None: fake_api)
+    monkeypatch.setattr(mmou_jobs.threading, "Thread", FakeThread)
+
+    service = MMOUBenchmarkJobService(output_root=tmp_path)
+    created = service.start_job(MMOUJobCreateRequest(limit=2, stratified=False))
+    record = service.get_job_record(created.job_id)
+    assert record is not None
+    first = record.questions[record.question_ids[0]]
+    second = record.questions[record.question_ids[1]]
+    first.prediction_row = {"question_id": first.question_id, "answer": "A"}
+    second.prediction_row = {"question_id": second.question_id, "answer": "B"}
+    first.status = "complete"
+    second.status = "complete"
+    service._persist_predictions(record)
+
+    summary = service.evaluate_question(created.job_id, second.question_id)
+
+    assert summary is not None
+    assert summary.question_id == second.question_id
+    assert summary.answer == "B"
+    assert summary.correct is True
+    assert summary.submission_rows == 1
+    assert fake_api.exported_submissions[-1] == [{"question_id": second.question_id, "answer": "B"}]
+
+    persisted = json.loads(
+        Path(record.job_dir, "judge", "questions", f"{second.question_id}.json").read_text(encoding="utf-8")
+    )
+    assert persisted["correct"] is True
+
+    rehydrated = MMOUBenchmarkJobService(output_root=tmp_path)
+    jobs = rehydrated.list_jobs()
+    assert jobs[0].questions[1].latest_evaluation is not None
+    assert jobs[0].questions[1].latest_evaluation.correct is True
+
+
+def test_evaluate_question_rejects_unanswered_prediction(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_api,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(mmou_jobs, "load_mmou_benchmark_api", lambda _benchmarks_dir=None: fake_api)
+    monkeypatch.setattr(mmou_jobs.threading, "Thread", FakeThread)
+
+    service = MMOUBenchmarkJobService(output_root=tmp_path)
+    created = service.start_job(MMOUJobCreateRequest(limit=1, stratified=False))
+
+    with pytest.raises(ValueError, match="No answered MMOU prediction"):
+        service.evaluate_question(created.job_id, "a1")
 
 
 def test_hydration_marks_abandoned_running_job_interrupted(tmp_path: Path) -> None:

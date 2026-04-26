@@ -12,7 +12,13 @@ if str(ROOT / "api") not in sys.path:
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
-from sanjaya_api.models import MMOUCatalogResponse, MMOUJobSummary, MMOUQuestionTraceResponse
+from sanjaya_api.models import (
+    MMOUCatalogResponse,
+    MMOUEvaluationSummary,
+    MMOUJobSummary,
+    MMOUQuestionEvaluationSummary,
+    MMOUQuestionTraceResponse,
+)
 from sanjaya_api.routes import mmou_jobs as mmou_routes
 
 
@@ -60,6 +66,7 @@ def _summary(status: str = "pending") -> MMOUJobSummary:
         stdout_tail=[],
         stderr_tail=[],
         revision=1,
+        latest_evaluation=None,
     )
 
 
@@ -92,6 +99,33 @@ class FakeMMOUService:
         self.resumed.append(job_id)
         return _summary("pending") if job_id == "mmou_job_test" else None
 
+    def evaluate_job(self, job_id):
+        if job_id == "empty":
+            raise ValueError("No answered MMOU predictions are available to score yet.")
+        if job_id != "mmou_job_test":
+            return None
+        return MMOUEvaluationSummary(
+            answered_accuracy_pct=80.0,
+            correct=8,
+            answered=10,
+            evaluated_at="2026-04-26T00:00:00+00:00",
+            submission_rows=10,
+        )
+
+    def evaluate_question(self, job_id, question_id):
+        if question_id == "empty":
+            raise ValueError("No answered MMOU prediction is available for question empty.")
+        if job_id != "mmou_job_test" or question_id != "q1":
+            return None
+        return MMOUQuestionEvaluationSummary(
+            question_id="q1",
+            answer="A",
+            correct=True,
+            answered_accuracy_pct=100.0,
+            evaluated_at="2026-04-26T00:00:00+00:00",
+            submission_rows=1,
+        )
+
     def get_question_trace(self, job_id, question_id):
         if job_id != "mmou_job_test" or question_id != "q1":
             return None
@@ -113,6 +147,8 @@ def test_mmou_routes_create_list_resume_and_trace(monkeypatch) -> None:
     created = client.post("/mmou-jobs", json={"limit": 1, "question_ids": ["q1"]})
     listed = client.get("/mmou-jobs")
     resumed = client.post("/mmou-jobs/mmou_job_test/resume")
+    evaluated = client.post("/mmou-jobs/mmou_job_test/evaluate")
+    question_evaluated = client.post("/mmou-jobs/mmou_job_test/questions/q1/evaluate")
     trace = client.get("/mmou-jobs/mmou_job_test/questions/q1/trace")
 
     assert created.status_code == 200
@@ -122,5 +158,30 @@ def test_mmou_routes_create_list_resume_and_trace(monkeypatch) -> None:
     assert len(listed.json()) == 1
     assert resumed.status_code == 200
     assert service.resumed == ["mmou_job_test"]
+    assert evaluated.status_code == 200
+    assert evaluated.json()["answered_accuracy_pct"] == 80.0
+    assert evaluated.json()["correct"] == 8
+    assert question_evaluated.status_code == 200
+    assert question_evaluated.json()["correct"] is True
     assert trace.status_code == 200
     assert trace.json()["events"][0]["kind"] == "run_start"
+
+
+def test_mmou_evaluate_route_errors(monkeypatch) -> None:
+    service = FakeMMOUService()
+    monkeypatch.setattr(mmou_routes, "_mmou_jobs", service)
+    app = FastAPI()
+    app.include_router(mmou_routes.router)
+    client = TestClient(app)
+
+    missing = client.post("/mmou-jobs/missing/evaluate")
+    empty = client.post("/mmou-jobs/empty/evaluate")
+    missing_question = client.post("/mmou-jobs/mmou_job_test/questions/missing/evaluate")
+    empty_question = client.post("/mmou-jobs/mmou_job_test/questions/empty/evaluate")
+
+    assert missing.status_code == 404
+    assert empty.status_code == 400
+    assert missing_question.status_code == 404
+    assert empty_question.status_code == 400
+    assert "No answered MMOU predictions" in empty.json()["detail"]
+    assert "No answered MMOU prediction" in empty_question.json()["detail"]
