@@ -141,6 +141,7 @@ uv.lock
 # Project specific
 baml_client/
 data/
+Webshare 50 proxies.txt
 
 # UI
 ui/node_modules/
