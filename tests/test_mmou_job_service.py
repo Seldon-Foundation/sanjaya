@@ -90,12 +90,14 @@ class FakeAgent:
 
 class FakeAdapter:
     calls: list[dict] = []
+    requests: list[Any] = []
 
     def __init__(self, **kwargs):
         self.kwargs = kwargs
         FakeAdapter.calls.append(kwargs)
 
     def generate(self, request):
+        FakeAdapter.requests.append(request)
         callback = self.kwargs.get("agent_callback")
         if callback:
             callback(FakeAgent(), {"run_id": "fake-run"})
@@ -252,6 +254,8 @@ def test_run_job_writes_predictions_trace_and_cleans_temp_video_dir(
     tmp_path: Path,
 ) -> None:
     real_thread = mmou_jobs.threading.Thread
+    FakeAdapter.calls.clear()
+    FakeAdapter.requests.clear()
     monkeypatch.setattr(mmou_jobs, "load_mmou_benchmark_api", lambda _benchmarks_dir=None: fake_api)
     monkeypatch.setattr(mmou_jobs.threading, "Thread", FakeThread)
     monkeypatch.setattr(mmou_jobs, "SanjayaMMOUAdapter", FakeAdapter)
@@ -277,6 +281,16 @@ def test_run_job_writes_predictions_trace_and_cleans_temp_video_dir(
     assert fake_api.downloaded_dirs
     assert all(not path.exists() for path in fake_api.downloaded_dirs)
     assert FakeAdapter.calls[-1]["recursive_model"] == "google-vertex:gemini-3.1-pro-preview"
+    request = FakeAdapter.requests[-1]
+    assert request.system_prompt is None
+    assert request.metadata == {"question_id": "a1"}
+    assert "Question: Question a1?" in request.prompt
+    assert "Options:" in request.prompt
+    assert "Question ID" not in request.prompt
+    assert "Domain:" not in request.prompt
+    assert "Evidence Window" not in request.prompt
+    assert "MMOU" not in request.prompt
+    assert "benchmark" not in request.prompt.lower()
 
 
 def test_resume_skips_completed_predictions(

@@ -21,6 +21,33 @@ class FakeRequest(SimpleNamespace):
         return "stable-cache-key"
 
 
+def test_mmou_prompt_sanitizer_removes_summary_and_benchmark_fields() -> None:
+    raw = (
+        "Whole Video Summary:\n"
+        "A spoiler summary that should not be provided.\n\n"
+        "Use the summary as high-level context for the full video, but answer based on the provided video clip.\n\n"
+        "Answer the multiple-choice question about the video.\n"
+        "Return only JSON with one key: {\"answer\": \"A\"}.\n\n"
+        "Question ID: q-1\n"
+        "Domain: Sports\n"
+        "Question: What happens next?\n"
+        "Evidence Window: 00:10 to 00:20\n"
+        "Options:\nA. Alpha\nB. Beta\n"
+    )
+
+    prompt = mmou_adapter._sanitize_mmou_prompt(raw)
+
+    assert "Question: What happens next?" in prompt
+    assert "Options:" in prompt
+    assert "Whole Video Summary" not in prompt
+    assert "spoiler summary" not in prompt
+    assert "Question ID" not in prompt
+    assert "Domain:" not in prompt
+    assert "Evidence Window" not in prompt
+    assert "MMOU" not in prompt
+    assert "benchmark" not in prompt.lower()
+
+
 def test_mmou_adapter_wraps_sanjaya_answer_and_cleans_temp_artifacts(monkeypatch, tmp_path: Path) -> None:
     video_path = tmp_path / "sample.mp4"
     video_path.write_bytes(b"video")
@@ -58,7 +85,15 @@ def test_mmou_adapter_wraps_sanjaya_answer_and_cleans_temp_artifacts(monkeypatch
     monkeypatch.setattr(mmou_adapter, "_generation_response_class", lambda: FakeGenerationResponse)
     request = FakeRequest(
         model="sanjaya-rlm",
-        prompt="Answer this MMOU question.",
+        prompt=(
+            "Answer the multiple-choice question about the video.\n"
+            "Return only JSON with one key: {\"answer\": \"A\"}.\n\n"
+            "Question ID: q-1\n"
+            "Domain: Sports\n"
+            "Question: What happens next?\n"
+            "Evidence Window: 00:10 to 00:20\n"
+            "Options:\nA. Alpha\nB. Beta\n"
+        ),
         media=[SimpleNamespace(path=video_path)],
         metadata={"question_id": "q-1"},
     )
@@ -91,8 +126,14 @@ def test_mmou_adapter_wraps_sanjaya_answer_and_cleans_temp_artifacts(monkeypatch
     assert agent.kwargs["recursive_model"] == "pro-child"
     assert agent.kwargs["critic_model"] is None
     assert agent.kwargs["caption_model"] is None
-    assert agent.ask_call["question"] == "Answer this MMOU question."
-    assert agent.ask_call["context"]["question_id"] == "q-1"
+    assert "Question: What happens next?" in agent.ask_call["question"]
+    assert "Options:" in agent.ask_call["question"]
+    assert "Question ID" not in agent.ask_call["question"]
+    assert "Domain:" not in agent.ask_call["question"]
+    assert "Evidence Window" not in agent.ask_call["question"]
+    assert "MMOU" not in agent.ask_call["question"]
+    assert "benchmark" not in agent.ask_call["question"].lower()
+    assert agent.ask_call["context"] is None
     assert agent.ask_call["video"] == str(video_path)
     assert request.cache_adapter_name == "sanjaya-rlm"
     assert not agent.workspace_dir.exists()

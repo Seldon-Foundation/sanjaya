@@ -62,7 +62,6 @@ def _load_mmou_benchmark_api_cached(benchmarks_dir: str) -> SimpleNamespace:
         MMOU_DATASET_FILE,
         MMOU_EVAL_SPACE,
         MMOUSample,
-        build_mmou_prompt,
         download_mmou_metadata,
         download_remote_video,
         evaluate_submission_with_api,
@@ -77,7 +76,6 @@ def _load_mmou_benchmark_api_cached(benchmarks_dir: str) -> SimpleNamespace:
     return SimpleNamespace(
         MMOU_DATASET_FILE=MMOU_DATASET_FILE,
         MMOUSample=MMOUSample,
-        build_mmou_prompt=build_mmou_prompt,
         download_mmou_metadata=download_mmou_metadata,
         download_remote_video=download_remote_video,
         evaluate_submission_with_api=evaluate_submission_with_api,
@@ -142,6 +140,16 @@ def _sample_to_payload(sample: Any) -> dict[str, Any]:
         "end_time": sample.end_time,
         "video_duration": sample.video_duration,
     }
+
+
+def _build_mmou_model_prompt(sample: Any) -> str:
+    options_text = "\n".join(f"{letter}. {text}" for letter, text in sorted(dict(sample.options).items()))
+    return (
+        "Answer the multiple-choice question about the video.\n"
+        "Return only JSON with one key: {\"answer\": \"A\"}.\n\n"
+        f"Question: {sample.question}\n"
+        f"Options:\n{options_text}"
+    )
 
 
 def _safe_name(value: str) -> str:
@@ -889,7 +897,7 @@ class MMOUBenchmarkJobService:
                 question.run_id = _metadata["run_id"]
 
         try:
-            with tempfile.TemporaryDirectory(prefix=f"mmou-video-{_safe_name(question.question_id)[:16]}-") as video_dir:
+            with tempfile.TemporaryDirectory(prefix="video-input-") as video_dir:
                 source_video_path = api.download_remote_video(sample, Path(video_dir))
                 artifact_root = Path(record.job_dir) / "artifacts" / _safe_name(question.question_id)
                 adapter = SanjayaMMOUAdapter(
@@ -911,10 +919,10 @@ class MMOUBenchmarkJobService:
                 response = adapter.generate(
                     api.GenerationRequest(
                         model=MODEL_NAME,
-                        system_prompt="You are a careful multimodal evaluator.",
-                        prompt=api.build_mmou_prompt(sample),
+                        system_prompt=None,
+                        prompt=_build_mmou_model_prompt(sample),
                         media=[api.MediaInput(type=api.MediaType.video, path=source_video_path)],
-                        metadata={"benchmark": "mmou", "question_id": question.question_id},
+                        metadata={"question_id": question.question_id},
                     )
                 )
 

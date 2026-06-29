@@ -18,6 +18,7 @@ from sanjaya.prompts import PromptConfig
 from sanjaya.tools.video import VideoToolkit
 
 ANSWER_PATTERN = re.compile(r"\b([A-J])\b", re.IGNORECASE)
+_LEAKY_PROMPT_PREFIXES = ("question id:", "domain:", "evidence window:")
 
 
 def _generation_response_class() -> Any:
@@ -41,6 +42,38 @@ def _answer_schema() -> dict[str, Any]:
             },
         },
     }
+
+
+def _sanitize_mmou_prompt(prompt: Any) -> str:
+    """Remove MMOU benchmark metadata before the prompt reaches Sanjaya."""
+    raw = str(prompt or "").strip()
+    if not raw:
+        return raw
+
+    lines = raw.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip().lower().startswith("answer the multiple-choice question"):
+            lines = lines[index:]
+            break
+
+    cleaned_lines: list[str] = []
+    for line in lines:
+        normalized = line.strip().lower()
+        if normalized.startswith(_LEAKY_PROMPT_PREFIXES):
+            continue
+        if "downstream multiple-choice qa system" in normalized:
+            continue
+        if normalized.startswith("whole video summary:"):
+            continue
+        if normalized.startswith("use the summary as high-level context"):
+            continue
+        cleaned_lines.append(line)
+
+    cleaned = "\n".join(cleaned_lines).strip()
+    cleaned = re.sub(r"\bMMOU\b", "video", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bbenchmark\b", "task", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bevaluator\b", "assistant", cleaned, flags=re.IGNORECASE)
+    return cleaned
 
 
 def _slug(value: str) -> str:
@@ -171,7 +204,7 @@ class SanjayaMMOUAdapter:
         if self.keep_artifacts:
             workspace_context = nullcontext(str(Path(self.artifacts_root or "sanjaya_artifacts/mmou")))
         else:
-            workspace_context = tempfile.TemporaryDirectory(prefix="sanjaya-mmou-")
+            workspace_context = tempfile.TemporaryDirectory(prefix="sanjaya-video-")
 
         with workspace_context as workspace_dir:
             Path(workspace_dir).mkdir(parents=True, exist_ok=True)
@@ -201,15 +234,7 @@ class SanjayaMMOUAdapter:
                         "workspace_dir": str(workspace_dir),
                     },
                 )
-            answer = agent.ask(
-                str(getattr(request, "prompt", "")),
-                context={
-                    "run_id": run_id,
-                    "benchmark": "mmou",
-                    "question_id": question_id,
-                },
-                video=str(video_path),
-            )
+            answer = agent.ask(_sanitize_mmou_prompt(getattr(request, "prompt", "")), video=str(video_path))
 
         text, parsed_json = _response_text(answer)
         return response_cls(
