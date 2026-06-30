@@ -2,7 +2,7 @@ import { readFile, stat } from "fs/promises";
 import { extname, join } from "path";
 import { NextResponse, type NextRequest } from "next/server";
 
-const PROJECT_ROOT = join(process.cwd(), "..");
+const PROJECT_ROOT = join(/* turbopackIgnore: true */ process.cwd(), "..");
 const DATA_DIR = join(PROJECT_ROOT, "data");
 
 const MIME: Record<string, string> = {
@@ -44,7 +44,7 @@ async function existingFile(path: string): Promise<string | null> {
 async function resolveFramePath(framePath: string): Promise<string | null> {
   const normalized = normalizeInputPath(framePath);
 
-  // Absolute paths (used by image benchmark JSONs and uploads)
+  // Absolute artifact paths from persisted trace payloads.
   if (normalized.startsWith("/")) {
     const absolute = await existingFile(normalized);
     if (absolute) return absolute;

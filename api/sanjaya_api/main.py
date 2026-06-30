@@ -18,14 +18,12 @@ if str(SRC_DIR) not in sys.path:
 # when the API is started from a shell that has not exported them.
 load_dotenv(PROJECT_ROOT / ".env", override=True)
 
-from sanjaya_api.routes.benchmark_jobs import router as benchmark_jobs_router
 from sanjaya_api.routes.health import router as health_router
 from sanjaya_api.routes.mmou_jobs import router as mmou_jobs_router
-from sanjaya_api.routes.runs import router as runs_router
 
 app = FastAPI(
     title="Sanjaya API",
-    description="FastAPI bridge for VideoRLM orchestration monitoring",
+    description="FastAPI bridge for MMOU video agent jobs",
     version="0.1.0",
 )
 
@@ -44,6 +42,4 @@ app.add_middleware(
 )
 
 app.include_router(health_router)
-app.include_router(runs_router)
-app.include_router(benchmark_jobs_router)
 app.include_router(mmou_jobs_router)

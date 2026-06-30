@@ -40,8 +40,6 @@ class Settings(BaseSettings):
     google_cloud_project: str | None = None
     google_cloud_location: str = "global"
 
-    # Moondream (vision)
-    moondream_api_key: str | None = None
 
 
 @lru_cache

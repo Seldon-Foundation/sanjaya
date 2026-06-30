@@ -1,70 +1,29 @@
-# Sanjaya API — Backend
+# Sanjaya API
 
-FastAPI bridge wrapping the unified `Agent` for the Sanjaya HUD dashboard. Runs orchestrations in background threads and streams trace events via SSE.
+FastAPI backend for the MMOU viewer.
 
-## Setup
+Run it from the repository root:
 
 ```bash
-cd api
-uv sync
-uv run uvicorn sanjaya_api.main:app --port 8000
+just api
 ```
 
-Or from project root: `just dev` (starts both API and UI via Overmind).
+Default URL:
 
-## Environment Variables
-
-Inherits from parent project `.env`:
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `GOOGLE_API_KEY` | Recommended | Gemini / Vertex provider key |
-| `GOOGLE_CLOUD_PROJECT` | Recommended | Vertex project id |
-| `GOOGLE_CLOUD_LOCATION` | Optional | Vertex location (`global` by default) |
-| `OPENROUTER_API_KEY` | Optional | Alternate provider for non-video models |
-| `OPENAI_API_KEY` | Optional | OpenAI provider |
-| `ANTHROPIC_API_KEY` | Optional | Anthropic provider |
-| `LOGFIRE_TOKEN` | Optional | Observability |
-
-## API Endpoints
-
-### `GET /health`
-Health check.
-```json
-{"status": "ok"}
+```text
+http://localhost:8000
 ```
 
-### `POST /runs`
-Start a new VideoRLM orchestration run.
+## Routes
 
-**Request:**
-```json
-{
-  "video_path": "/path/to/video.mp4",
-  "question": "What is happening in the video?",
-  "subtitle_path": null
-}
-```
-
-**Response:**
-```json
-{"run_id": "a1b2c3d4e5f6"}
-```
-
-### `GET /runs/{run_id}/events`
-SSE stream of trace events for a run.
-
-**Event types:** `run_start`, `root_response`, `code_instruction`, `code_execution`, `video_inspection`, `frame_inspection`, `audio_analysis`, `sub_llm`, `run_end`, `heartbeat`, `stream_end`, `stream_error`
-
-**Event format:**
-```
-event: root_response
-data: {"kind": "root_response", "timestamp": 1712234567.89, "payload": {...}}
-```
-
-## Architecture
-
-- `OrchestratorService` manages background threads for `Agent.ask()`
-- SSE polling reads from `Tracer.events` (append-only list, GIL-safe)
-- Heartbeat sent every 2s to keep connections alive
-- Stream closes after `run_end` event + `stream_end` sentinel
+- `GET /health`
+- `GET /mmou-jobs/catalog`
+- `POST /mmou-jobs`
+- `GET /mmou-jobs`
+- `GET /mmou-jobs/{job_id}`
+- `POST /mmou-jobs/{job_id}/stop`
+- `POST /mmou-jobs/{job_id}/resume`
+- `POST /mmou-jobs/{job_id}/evaluate`
+- `POST /mmou-jobs/{job_id}/questions/{question_id}/evaluate`
+- `GET /mmou-jobs/{job_id}/questions/{question_id}/trace`
+- `GET /mmou-jobs/{job_id}/events`

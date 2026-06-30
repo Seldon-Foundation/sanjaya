@@ -147,7 +147,6 @@ class VideoToolkit(Toolkit):
         self._tracer: Any = None
         self._budget: Any = None
 
-        self._modality: str = "balanced"
         self._active_span: tuple[float, float] | None = None
         self._active_zoom_box: ZoomBox | None = None
 
@@ -168,7 +167,6 @@ class VideoToolkit(Toolkit):
 
         self._video_path = str(Path(video).resolve())
         self._question = context.get("question")
-        self._modality = context.get("modality", "balanced")
         self._duration_s = video_duration_seconds(self._video_path)
         self._video_info = None
 
@@ -206,7 +204,6 @@ class VideoToolkit(Toolkit):
         child._tracer = self._tracer
         child._budget = self._budget
         child._prompt_config = self._prompt_config
-        child._modality = self._modality
         child._active_span = active_span if active_span is not None else self._active_span
         child._active_zoom_box = self.effective_zoom_box(active_zoom_box)
         child._video_slice_cache = self._video_slice_cache
@@ -332,12 +329,7 @@ class VideoToolkit(Toolkit):
         if self._active_zoom_box is not None:
             parts.append("\nActive zoom: video coordinates are relative to the visible crop.")
 
-        if self._modality == "transcript_primary":
-            parts.append("\nThis question is audio/transcript-first. Start with `analyze_audio()` on relevant short spans.")
-        elif self._modality == "vision_primary":
-            parts.append("\nThis question is vision-first. Start with `inspect_video()` on relevant short spans.")
-        else:
-            parts.append("\nThis question is balanced. Use both `inspect_video()` and `analyze_audio()` where needed.")
+        parts.append("\nUse both `inspect_video()` and `analyze_audio()` where needed.")
 
         return "\n".join(parts)
 

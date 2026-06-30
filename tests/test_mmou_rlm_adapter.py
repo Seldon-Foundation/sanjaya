@@ -124,8 +124,6 @@ def test_mmou_adapter_wraps_sanjaya_answer_and_cleans_temp_artifacts(monkeypatch
     agent = instances[0]
     assert agent.kwargs["sub_model"] == "flash"
     assert agent.kwargs["recursive_model"] == "pro-child"
-    assert agent.kwargs["critic_model"] is None
-    assert agent.kwargs["caption_model"] is None
     assert "Question: What happens next?" in agent.ask_call["question"]
     assert "Options:" in agent.ask_call["question"]
     assert "Question ID" not in agent.ask_call["question"]

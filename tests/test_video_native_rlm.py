@@ -121,7 +121,6 @@ def toolkit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_video: Path) -
         "video": str(fake_video),
         "question": "What is in the video?",
         "context": {"run_id": "test-run"},
-        "modality": "balanced",
     })
     return tk
 
@@ -322,12 +321,13 @@ def test_agent_defaults_and_api_contract():
     assert agent.transcription_model == "whisper-1"
     assert agent.transcription_language is None
 
-    from sanjaya_api.models import RunRequest
+    from sanjaya_api.models import MMOUJobCreateRequest
 
-    schema = RunRequest.model_json_schema()
-    assert schema["properties"]["max_depth"]["default"] == 1
-    assert "subtitle_mode" not in schema.get("properties", {})
-    assert "subtitle_api_model" not in schema.get("properties", {})
+    schema = MMOUJobCreateRequest.model_json_schema()
+    assert schema["properties"]["max_depth"]["default"] == 2
+    assert schema["properties"]["workers"]["default"] == 1
+    assert "caption_model" not in schema.get("properties", {})
+    assert "critic_model" not in schema.get("properties", {})
 
 
 def test_agent_binds_video_inspection_to_root_model() -> None:
@@ -355,8 +355,6 @@ def test_recursive_model_controls_child_rlm_orchestrator(monkeypatch: pytest.Mon
         recursive_model="child-rlm-model",
         vision_model=None,
         audio_model=None,
-        caption_model=None,
-        critic_model=None,
         max_depth=2,
         tracing=False,
     )
@@ -441,11 +439,6 @@ def test_promptless_inspect_video_is_consumed_by_next_root_turn(
         "sanjaya.tools.video.toolkit._extract_frame_impl",
         lambda video_path, at_s, output_path: _write_artifact(output_path, b"frame"),
     )
-    monkeypatch.setattr(
-        "sanjaya.core.schema.classify_question_modality",
-        lambda question, llm_client: "balanced",
-    )
-
     completion_calls: list[str] = []
     completion_with_media_calls: list[dict[str, Any]] = []
 
@@ -506,11 +499,6 @@ def test_incomplete_video_run_persists_partial_trace(
             "container": "mov,mp4,m4a,3gp,3g2,mj2",
             "file_size_mb": 12.34,
         },
-    )
-    monkeypatch.setattr("sanjaya.agent.classify_question_modality", lambda question, llm_client: "balanced", raising=False)
-    monkeypatch.setattr(
-        "sanjaya.core.schema.classify_question_modality",
-        lambda question, llm_client: "balanced",
     )
     monkeypatch.setattr(
         "sanjaya.core.schema.generate_answer_schema",
@@ -578,11 +566,6 @@ def test_agent_injects_transcript_without_putting_text_in_prompt(
     from sanjaya.core.loop import LoopResult
 
     monkeypatch.setattr("sanjaya.tools.video.toolkit.video_duration_seconds", lambda _: 30.0)
-    monkeypatch.setattr(
-        "sanjaya.core.schema.classify_question_modality",
-        lambda question, llm_client: "balanced",
-    )
-
     transcript = {
         "text": "secret spoken words",
         "segments": [

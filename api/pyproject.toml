@@ -1,7 +1,7 @@
 [project]
 name = "sanjaya-api"
 version = "0.1.0"
-description = "FastAPI bridge for VideoRLM orchestration monitoring"
+description = "FastAPI bridge for MMOU video agent jobs"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",

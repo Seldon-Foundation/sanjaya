@@ -19,8 +19,6 @@ KIND_MAP: dict[str, str] = {
     "sanjaya.sub_llm_call.regular_end": "sub_llm",
     "sanjaya.sub_llm_call.vision_start": "vision_start",
     "sanjaya.sub_llm_call.vision_end": "vision",
-    "sanjaya.sub_llm_call.caption_frames_start": "vision_start",
-    "sanjaya.sub_llm_call.caption_frames_end": "vision",
     "sanjaya.rlm_subcall_start": "subcall_start",
     "sanjaya.rlm_subcall_end": "subcall",
     "sanjaya.video_inspection_start": "video_inspection_start",
@@ -29,13 +27,8 @@ KIND_MAP: dict[str, str] = {
     "sanjaya.frame_inspection_end": "frame_inspection",
     "sanjaya.audio_analysis_start": "audio_analysis_start",
     "sanjaya.audio_analysis_end": "audio_analysis",
-    "sanjaya.sub_llm_call.image_vision_start": "image_inspection_start",
-    "sanjaya.sub_llm_call.image_vision_end": "image_inspection",
-    "sanjaya.sub_llm_call.image_compare_start": "image_compare_start",
-    "sanjaya.sub_llm_call.image_compare_end": "image_compare",
     "sanjaya.schema_generation_start": "schema_generation_start",
     "sanjaya.schema_generation_end": "schema_generation",
-    "sanjaya.critic_evaluation": "critic_evaluation",
 }
 
 

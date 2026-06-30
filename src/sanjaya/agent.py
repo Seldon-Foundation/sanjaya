@@ -21,8 +21,6 @@ from .core.repl import AgentREPL
 from .llm.client import LLMClient, ModelSpec
 from .model_defaults import (
     DEFAULT_AUDIO_MODEL,
-    DEFAULT_CAPTION_MODEL,
-    DEFAULT_CRITIC_MODEL,
     DEFAULT_FALLBACK_MODEL,
     DEFAULT_ROOT_MODEL,
     DEFAULT_SUB_MODEL,
@@ -62,11 +60,6 @@ def _resolve_model(
     if isinstance(spec, Model):
         return spec
 
-    # Moondream specs are handled directly by LLMClient — don't resolve
-    from .llm.moondream import is_moondream_spec
-    if is_moondream_spec(spec):
-        return spec
-
     # Strip provider prefix for model name (e.g. "openrouter:openai/gpt-4.1-mini" → "openai/gpt-4.1-mini")
     model_name = spec.split(":", 1)[1] if ":" in spec else spec
 
@@ -102,9 +95,7 @@ class Agent:
         recursive_model: ModelSpec | None = None,
         vision_model: ModelSpec | None = DEFAULT_VISION_MODEL,
         audio_model: ModelSpec | None = DEFAULT_AUDIO_MODEL,
-        caption_model: ModelSpec | None = DEFAULT_CAPTION_MODEL,
         fallback_model: ModelSpec | None = DEFAULT_FALLBACK_MODEL,
-        critic_model: ModelSpec | None = DEFAULT_CRITIC_MODEL,
         *,
         prompts: PromptConfig | None = None,
         provider: Provider | None = None,
@@ -116,7 +107,6 @@ class Agent:
         max_budget_usd: float | None = None,
         max_timeout_s: float | None = None,
         compaction_threshold: float = 0.85,
-        critic_threshold: int = 70,
         tracing: bool = True,
     ):
         # Resolve all model specs through the provider chain.
@@ -141,7 +131,6 @@ class Agent:
         self.recursive_model = recursive_model
         self.vision_model = vision_model
         self.audio_model = audio_model
-        self.caption_model = caption_model
         self.fallback_model = fallback_model
         self.auto_transcribe_video = auto_transcribe_video
         self.transcription_model = transcription_model
@@ -152,7 +141,6 @@ class Agent:
         self.max_budget_usd = max_budget_usd
         self.max_timeout_s = max_timeout_s
         self.compaction_threshold = compaction_threshold
-        self.critic_threshold = critic_threshold
 
         # LLM clients
         self._orchestrator = LLMClient(
@@ -167,29 +155,12 @@ class Agent:
             fallback_model=fallback_model,
             name="sub_llm",
         )
-        self._critic = LLMClient(model=critic_model, name="critic") if critic_model else None
         self._audio_llm = LLMClient(
             model=audio_model,
             vision_model=audio_model,
             fallback_model=None,
             name="audio_llm",
         ) if audio_model else None
-
-        # Captioner (separate from sub_llm — used only by caption_frames)
-        self._captioner: Any = None
-        if caption_model is not None:
-            from .llm.moondream import MOONDREAM_STATION_BASE, MoondreamVisionClient, is_moondream_spec
-            if is_moondream_spec(caption_model):
-                spec = str(caption_model)
-                use_station = spec.startswith("moondream-station:")
-                model_id = spec.split(":", 1)[1] if ":" in spec else "moondream3-preview"
-                try:
-                    self._captioner = MoondreamVisionClient(
-                        model=model_id,
-                        base_url=MOONDREAM_STATION_BASE if use_station else None,
-                    )
-                except Exception:
-                    pass
 
         # Tool registry
         self._registry = ToolRegistry()
@@ -234,8 +205,6 @@ class Agent:
             toolkit._budget = self._budget
         if hasattr(toolkit, "_audio_llm_client"):
             toolkit._audio_llm_client = self._audio_llm
-        if hasattr(toolkit, "_captioner") and self._captioner is not None:
-            toolkit._captioner = self._captioner
         toolkit._prompt_config = self._prompts
 
     def _build_runtime_registry(
@@ -567,8 +536,6 @@ class Agent:
         context: Any = None,
         video: str | None = None,
         subtitle: str | None = None,
-        document: str | list[str] | None = None,
-        image: str | list[str] | None = None,
     ) -> Answer:
         """Run the RLM loop and return a structured answer."""
         start_time = time.time()
@@ -584,35 +551,16 @@ class Agent:
             self._bind_toolkit_runtime(vt)
             self._registry.register_toolkit(vt)
 
-        # Auto-register DocumentToolkit if document= provided and none registered
-        if document and not self._has_document_toolkit():
-            from .tools.document import DocumentToolkit
-            dt = DocumentToolkit()
-            self._bind_toolkit_runtime(dt)
-            self._registry.register_toolkit(dt)
-
-        # Auto-register ImageToolkit if image= provided and none registered
-        if image and not self._has_image_toolkit():
-            from .tools.image import ImageToolkit
-            it = ImageToolkit()
-            self._bind_toolkit_runtime(it)
-            self._registry.register_toolkit(it)
-
         transcript: dict[str, Any] | None = None
         if video and self.auto_transcribe_video:
             transcript = self._prepare_video_transcript(video, subtitle)
 
-        # Build context dict for toolkits (modality classified later, inside the
-        # completion span, so the sub_llm call shows up under sanjaya.completion)
         context_dict: dict[str, Any] = {
             "question": question,
             "context": context,
             "video": video,
             "subtitle": subtitle,
             "transcript": transcript,
-            "document": document,
-            "image": image,
-            "modality": "balanced",
         }
 
         # Setup toolkits
@@ -776,7 +724,6 @@ class Agent:
             max_budget_usd=self.max_budget_usd,
             max_timeout_s=self.max_timeout_s,
             compaction_threshold=self.compaction_threshold,
-            critic_threshold=self.critic_threshold,
         )
 
         model_name = _model_label(self.model)
@@ -792,25 +739,6 @@ class Agent:
                 max_iterations=self.max_iterations,
             ) as comp_trace:
                 try:
-                    # Classify question modality inside the span so the sub_llm call
-                    # is nested under sanjaya.completion in traces.
-                    if video:
-                        from .core.schema import classify_question_modality
-                        modality = classify_question_modality(question, self._sub_llm)
-                        context_dict["modality"] = modality
-                        # Update toolkit modality and rebuild the system prompt
-                        # so the correct strategy prompt is used.
-                        for toolkit in run_registry.toolkits:
-                            if hasattr(toolkit, "_modality"):
-                                toolkit._modality = modality
-                        toolkit_sections = self._runtime_prompt_sections(run_registry, transcript)
-                        system_prompt = build_system_prompt(
-                            registry=run_registry,
-                            context_metadata=context_metadata,
-                            toolkit_sections=toolkit_sections,
-                            max_depth=self._max_depth,
-                        )
-
                     # Generate or use provided answer schema
                     from .core.schema import generate_answer_schema, schema_to_prompt_section
 
@@ -833,9 +761,7 @@ class Agent:
                         config=config,
                         budget=self._budget,
                         tracer=self._tracer,
-                        critic=self._critic,
                         answer_schema=answer_schema,
-                        critic_prompt=self._prompts.critic,
                         trace_context={"depth": 0},
                     )
 
@@ -1185,7 +1111,6 @@ class Agent:
                     config=child_config,
                     budget=child_budget,
                     tracer=self._tracer,
-                    critic=None,
                     answer_schema=None,
                     trace_context={"depth": depth},
                 )
@@ -1295,21 +1220,5 @@ class Agent:
         try:
             from .tools.video import VideoToolkit
             return any(isinstance(tk, VideoToolkit) for tk in self._registry.toolkits)
-        except ImportError:
-            return False
-
-    def _has_document_toolkit(self) -> bool:
-        """Check if a DocumentToolkit is already registered."""
-        try:
-            from .tools.document import DocumentToolkit
-            return any(isinstance(tk, DocumentToolkit) for tk in self._registry.toolkits)
-        except ImportError:
-            return False
-
-    def _has_image_toolkit(self) -> bool:
-        """Check if an ImageToolkit is already registered."""
-        try:
-            from .tools.image import ImageToolkit
-            return any(isinstance(tk, ImageToolkit) for tk in self._registry.toolkits)
         except ImportError:
             return False

@@ -22,11 +22,6 @@ class PromptConfig:
     # Toolkit strategy prompts
     video_strategy: str | None = None
     video_vision_first_strategy: str | None = None
-    document_strategy: str | None = None
-    image_strategy: str | None = None
-
-    # Critic
-    critic: str | None = None
 
     # Answer schema (dict, not str — skips LLM call when provided)
     answer_schema: dict[str, Any] | None = field(default=None, repr=False)

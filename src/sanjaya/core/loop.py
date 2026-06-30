@@ -25,7 +25,6 @@ class LoopConfig:
     max_budget_usd: float | None = None
     max_timeout_s: float | None = None
     compaction_threshold: float = 0.85
-    critic_threshold: int = 70
 
 
 @dataclass
@@ -39,8 +38,6 @@ class LoopResult:
 
 _MEDIA_TOOLS = {"inspect_video", "analyze_audio"}
 _DONE_SUPPRESSION_LIMIT = 1
-_STUCK_WINDOW = 3
-_STUCK_MAX_TRIGGERS = 2
 
 
 def _has_media_tools(repl: AgentREPL) -> bool:
@@ -73,14 +70,6 @@ def _media_analysis_done(repl: AgentREPL, messages: list[dict[str, str]]) -> boo
     return False
 
 
-def _get_toolkit_coverage(repl: AgentREPL) -> float:
-    """Get total temporal coverage in seconds from video toolkits."""
-    for tk in repl.registry.toolkits:
-        if hasattr(tk, "get_state"):
-            return tk.get_state().get("total_coverage_s", 0.0)
-    return 0.0
-
-
 def _drain_pending_root_media(repl: AgentREPL) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Collect promptless inspect_video attachments queued by toolkits."""
     media: list[dict[str, Any]] = []
@@ -106,25 +95,6 @@ def _drain_pending_root_media(repl: AgentREPL) -> tuple[list[dict[str, Any]], li
     return media, metadata
 
 
-def _is_stuck(
-    scores: list[int],
-    coverages: list[float],
-    window: int = _STUCK_WINDOW,
-) -> bool:
-    """Stuck if recent critic scores are flat/declining AND coverage hasn't grown."""
-    if len(scores) < window:
-        return False
-    recent = scores[-window:]
-    # Scores not improving (spread < 10 and last <= first)
-    if max(recent) - min(recent) < 10 and recent[-1] <= recent[0]:
-        # Coverage not growing
-        if len(coverages) >= window:
-            recent_cov = coverages[-window:]
-            if recent_cov[-1] - recent_cov[0] < 5.0:
-                return True
-    return False
-
-
 def _run_iteration(
     *,
     orchestrator: Any,
@@ -138,9 +108,7 @@ def _run_iteration(
     model_name: str,
     start_time: float,
     done_suppression_count: int = 0,
-    critic: Any | None = None,
     answer_schema: dict[str, Any] | None = None,
-    critic_prompt: str | None = None,
     trace_context: dict[str, Any] | None = None,
 ) -> LoopResult | None:
     """Run a single iteration, wrapped in tracer spans. Returns LoopResult if done."""
@@ -292,46 +260,6 @@ def _run_iteration(
                         iter_trace.record(done_suppressed=True, suppression_count=done_suppression_count + 1)
                     return None  # continue to next iteration
 
-                # Critic evaluation (modality-agnostic quality gate)
-                if critic and answer_schema and iteration < config.max_iterations - 1:
-                    from .critic import evaluate_answer
-
-                    _console.print("[dim]Running critic evaluation...[/]")
-                    eval_result = evaluate_answer(
-                        question=question,
-                        answer=final_answer,
-                        schema=answer_schema,
-                        critic_client=critic,
-                        threshold=config.critic_threshold,
-                        budget=budget,
-                        critic_prompt=critic_prompt,
-                    )
-                    score = eval_result.get("score", 0)
-                    _console.print(f"[dim]Critic score: {score}/100[/]")
-
-                    if tracer:
-                        tracer.emit("sanjaya.critic_evaluation", **trace_context, **eval_result)
-
-                    if not eval_result["pass"]:
-                        gaps = eval_result.get("gaps", [])
-                        feedback = eval_result.get("feedback", "Answer needs improvement.")
-                        gap_text = "\n".join(f"- {g}" for g in gaps) if gaps else feedback
-
-                        _console.print(f"[yellow]⚠️  Critic rejected (score {score}): {feedback}[/]")
-                        messages.append({
-                            "role": "user",
-                            "content": (
-                                f"Your answer was evaluated (score: {score}/100).\n"
-                                f"Issues:\n{gap_text}\n\n"
-                                "Investigate these gaps and call done() again with an improved answer."
-                            ),
-                        })
-                        repl._is_done = False
-                        repl._final_value = None
-                        if iter_trace:
-                            iter_trace.record(critic_rejected=True, critic_score=score, critic_gaps=gaps)
-                        return None  # continue loop
-
                 _console.print("[bold green]✅ Final answer found![/]")
                 if iter_trace:
                     iter_trace.record_final_answer(str(final_answer))
@@ -393,9 +321,7 @@ def run_loop(
     config: LoopConfig,
     budget: BudgetTracker,
     tracer: Tracer | None = None,
-    critic: Any | None = None,
     answer_schema: dict[str, Any] | None = None,
-    critic_prompt: str | None = None,
     trace_context: dict[str, Any] | None = None,
 ) -> LoopResult:
     """The RLM iteration loop.
@@ -420,9 +346,6 @@ def run_loop(
     ]
 
     done_suppression_count = 0
-    critic_scores: list[int] = []
-    coverage_history: list[float] = []
-    stuck_count = 0
 
     for iteration in range(config.max_iterations):
         # Check budget/timeout
@@ -447,9 +370,7 @@ def run_loop(
             model_name=model_name,
             start_time=start_time,
             done_suppression_count=done_suppression_count,
-            critic=critic,
             answer_schema=answer_schema,
-            critic_prompt=critic_prompt,
             trace_context=trace_context,
         )
         if result is not None:
@@ -461,34 +382,6 @@ def run_loop(
             and "You called done() without grounding the answer in native media analysis" in messages[-1].get("content", "")
         ):
             done_suppression_count += 1
-
-        # Track critic rejections and coverage for stuck detection
-        last_msg = messages[-1].get("content", "") if messages else ""
-        if "Your answer was evaluated (score:" in last_msg:
-            import re as _re
-            score_match = _re.search(r"score:\s*(\d+)/100", last_msg)
-            if score_match:
-                critic_scores.append(int(score_match.group(1)))
-                coverage_history.append(_get_toolkit_coverage(repl))
-
-                if _is_stuck(critic_scores, coverage_history):
-                    stuck_count += 1
-                    if stuck_count >= _STUCK_MAX_TRIGGERS:
-                        _console.print("[yellow]⚠️  Stuck twice, forcing early answer[/]")
-                        break
-                    _console.print("[yellow]⚠️  Stuck detected — nudging strategy change[/]")
-                    messages.append({
-                        "role": "user",
-                        "content": (
-                            "You appear to be stuck — the last few attempts scored "
-                            "similarly and you haven't explored new video regions. "
-                            "CHANGE YOUR APPROACH: inspect different short slices, "
-                            "analyze audio on another segment, or delegate smaller "
-                            "video spans to llm_query/rlm_query. If you've exhausted available "
-                            "evidence, call done() with your best answer noting "
-                            "what you couldn't verify."
-                        ),
-                    })
 
     # Max iterations reached — force final answer
     _console.print("[yellow]⚠️  Max iterations reached, forcing final answer[/]")

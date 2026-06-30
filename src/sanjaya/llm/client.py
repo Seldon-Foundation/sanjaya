@@ -1,7 +1,4 @@
-"""Unified LLM client with text, image, video, audio, and batched support.
-
-Merges the old LLMClient (text-only) and VideoLLMClient (text + vision)
-into a single class. Adds concurrent batched completions.
+"""LLM client with text, video/audio media, and batched support.
 
 Accepts either a pydantic-ai ``Model`` object (with provider/auth
 already configured) or a plain model string like ``"openrouter:openai/gpt-4o"``.
@@ -177,15 +174,6 @@ def _compute_cost(
         pass
     return None
 
-
-
-def _moondream_cost(input_tokens: int, output_tokens: int) -> float:
-    """Compute Moondream cost based on cloud pricing."""
-    from .pricing import moondream_cost
-
-    return moondream_cost(input_tokens, output_tokens)
-
-
 class LLMClient:
     """Unified LLM client with text, vision, and batched support."""
 
@@ -204,25 +192,6 @@ class LLMClient:
         self.last_usage: UsageSnapshot | None = None
         self.last_call_metadata: CallMetadata | None = None
         self._media_binary_cache: dict[str, bytes] = {}
-
-        # Moondream direct client (bypasses pydantic-ai for vision)
-        self._moondream: Any = None
-        from .moondream import MOONDREAM_STATION_BASE, MoondreamVisionClient, is_moondream_spec
-        if is_moondream_spec(self.vision_model):
-            if isinstance(self.vision_model, MoondreamVisionClient):
-                self._moondream = self.vision_model
-            else:
-                # Parse "moondream:model-name" or "moondream-station:model-name"
-                spec = str(self.vision_model)
-                use_station = spec.startswith("moondream-station:")
-                model_id = spec.split(":", 1)[1] if ":" in spec else "moondream3-preview"
-                try:
-                    self._moondream = MoondreamVisionClient(
-                        model=model_id,
-                        base_url=MOONDREAM_STATION_BASE if use_station else None,
-                    )
-                except Exception:
-                    pass  # Fall back to pydantic-ai path
 
     # ── Text completions ────────────────────────────────────
 
@@ -260,25 +229,6 @@ class LLMClient:
         timeout: int = 300,
     ) -> str:
         """Single vision completion with image/video attachments."""
-        # Moondream bypass: use direct SDK instead of pydantic-ai
-        if self._moondream is not None:
-            resolved_frames = self._resolve_frame_paths(frame_paths, clip_paths)
-            start = time.time()
-            response = self._moondream.query_frames(prompt, resolved_frames)
-            self.last_usage = UsageSnapshot(
-                input_tokens=self._moondream.total_input_tokens,
-                output_tokens=self._moondream.total_output_tokens,
-                total_tokens=self._moondream.total_input_tokens + self._moondream.total_output_tokens,
-            )
-            self.last_call_metadata = CallMetadata(
-                requested_model=self._moondream.model_name,
-                model_used=self._moondream.model_name,
-                provider="moondream",
-                duration_seconds=round(time.time() - start, 3),
-                cost_usd=_moondream_cost(self._moondream.total_input_tokens, self._moondream.total_output_tokens),
-            )
-            return response
-
         user_content = self._build_vision_content(prompt, frame_paths, clip_paths)
         return self._call(self.vision_model, user_content, timeout=timeout)
 
@@ -291,17 +241,6 @@ class LLMClient:
 
         Each query dict has keys: prompt, frame_paths, clip_paths.
         """
-        if self._moondream is not None:
-            # Build batch items and send all queries in a single HTTP request
-            batch_items = []
-            for q in queries:
-                resolved = self._resolve_frame_paths(q.get("frame_paths"), q.get("clip_paths"))
-                batch_items.append({
-                    "frame_paths": resolved,
-                    "question": q["prompt"],
-                })
-            return self._moondream.query_batch(batch_items)
-
         return self._run_batched([
             {
                 "model": self.vision_model,

@@ -38,8 +38,6 @@ function getEventColor(kind: string): string {
     case "audio_analysis":
     case "schema_generation":
       return "text-hud-label";
-    case "critic_evaluation":
-      return "text-hud-amber";
     default:
       return "text-hud-dim";
   }
@@ -72,8 +70,6 @@ function getDotColor(kind: string): string {
     case "audio_analysis":
     case "schema_generation":
       return "bg-hud-label";
-    case "critic_evaluation":
-      return "bg-hud-amber";
     default:
       return "bg-hud-dim";
   }
@@ -250,14 +246,8 @@ function eventLabel(event: TraceEvent, depth: number): string {
       return mediaEventLabel(event);
     case "schema_generation":
       return "Schema";
-    case "critic_evaluation":
-      return "Critic";
     case "vision":
       return "Vision";
-    case "image_inspection":
-      return "Image";
-    case "image_compare":
-      return "Compare";
     default:
       return event.kind.replaceAll("_", " ");
   }
@@ -298,7 +288,7 @@ function getEventSummary(event: TraceEvent): string {
       case "run_end":
         return `status=${p.status ?? "complete"} tokens=${p.input_tokens ?? "?"}/${p.output_tokens ?? "?"}`;
       case "iteration_end":
-        return `iteration ${p.iteration ?? "?"}${p.final_answer ? " · final" : ""}${p.critic_rejected ? " · critic retry" : ""}`;
+        return `iteration ${p.iteration ?? "?"}${p.final_answer ? " · final" : ""}`;
       case "root_response":
         return `${shortModelName(p.model)}${p.attached_media_count ? ` · +${p.attached_media_count} media` : ""}${p.input_tokens ? ` · in ${p.input_tokens}` : ""}${p.output_tokens ? ` · out ${p.output_tokens}` : ""}${p.response_preview ? ` · ${(p.response_preview as string).slice(0, 70)}` : ""}`;
       case "code_instruction":
@@ -317,13 +307,8 @@ function getEventSummary(event: TraceEvent): string {
         return `${shortModelName(p.child_model)}${p.start_s != null && p.end_s != null ? ` · [${(p.start_s as number).toFixed(1)}s - ${(p.end_s as number).toFixed(1)}s]` : ""}${p.iterations_used != null ? ` · ${p.iterations_used} iters` : ""}${p.response_preview ? ` · ${(p.response_preview as string).slice(0, 70)}` : p.prompt_preview ? ` · ${(p.prompt_preview as string).slice(0, 70)}` : ""}`;
       case "sub_llm":
       case "vision":
-      case "image_inspection":
-      case "image_compare":
-        return `${shortModelName(p.model ?? p.model_used)} · ${((p.response_preview as string) ?? (p.prompt_preview as string) ?? "").slice(0, 70)}`;
       case "schema_generation":
         return `question=${p.question_chars ?? "?"}ch`;
-      case "critic_evaluation":
-        return `score=${p.score ?? "?"}/100 ${p.pass ? "✓PASS" : "✗FAIL"} ${((p.feedback as string) ?? "").slice(0, 50)}`;
       case "transcription":
         return `source=${p.source ?? "?"} path=${p.subtitle_path ?? "none"}`;
       default:
@@ -434,10 +419,7 @@ const VISIBLE_KINDS = new Set([
   "audio_analysis",
   "tool_call",
   "schema_generation",
-  "critic_evaluation",
   "vision",
-  "image_inspection",
-  "image_compare",
 ]);
 
 export function TraceTimeline({ events, startTime }: TraceTimelineProps) {
