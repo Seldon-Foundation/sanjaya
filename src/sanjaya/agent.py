@@ -343,8 +343,8 @@ class Agent:
             return None
         return (
             "## Transcript\n"
-            "A `transcript` dict is available in the REPL. Use it for spoken words and timestamps before "
-            "calling `analyze_audio()`.\n"
+            "A `transcript` dict is available in the REPL. It is for spoken language only, not sounds or music. "
+            "Use it for spoken words and timestamps before calling `analyze_audio()`.\n"
             "Shape: `{'text': str, 'segments': [{'start_s': float, 'end_s': float, "
             "'speaker': str, 'text': str}], 'metadata': dict}`. Some segments may not have `speaker`.\n"
             "`llm_query()` is text-only unless you include the relevant transcript excerpt in its prompt."
