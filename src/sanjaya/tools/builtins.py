@@ -29,7 +29,7 @@ def make_llm_query_tool(llm_query_fn: Callable[..., str]) -> Tool:
         description=(
             "Query a sub-LLM. If you provide start_s/end_s on a video run, the "
             "sub-LLM receives only that explicit video slice; otherwise this is "
-            "a text-only call."
+            "a text-only call. Use zoom_box with timestamps to zoom into a region."
         ),
         fn=llm_query_fn,
         parameters={
@@ -50,6 +50,12 @@ def make_llm_query_tool(llm_query_fn: Callable[..., str]) -> Tool:
                 default=None,
                 description="Optional absolute video end timestamp in seconds.",
             ),
+            "zoom_box": ToolParam(
+                name="zoom_box",
+                type_hint="tuple[float, float, float, float] | None",
+                default=None,
+                description="Optional 0-1000 coordinate box from top-left to zoom into.",
+            ),
         },
         return_type="str",
     )
@@ -62,14 +68,14 @@ def make_llm_query_batched_tool(llm_query_batched_fn: Callable[[list[Any]], list
         description=(
             "Run multiple sub-LLM queries concurrently. Each item can be a plain "
             "prompt string or a dict with prompt/start_s/end_s for slice-scoped "
-            "video analysis."
+            "video analysis, plus optional zoom_box."
         ),
         fn=llm_query_batched_fn,
         parameters={
             "queries": ToolParam(
                 name="queries",
                 type_hint="list[str | dict]",
-                description="List of prompt strings or dicts with prompt/start_s/end_s.",
+                description="List of prompt strings or dicts with prompt/start_s/end_s/zoom_box.",
             ),
         },
         return_type="list[str]",
@@ -86,7 +92,8 @@ def make_rlm_query_tool(rlm_query_fn: Callable[..., str]) -> Tool:
             "independently until it solves the sub-problem. Use this when the "
             "subtask requires multi-step reasoning or its own exploration loop. "
             "If start_s/end_s are provided on a video run, the child is explicitly "
-            "scoped to that slice. Falls back to llm_query at maximum recursion depth."
+            "scoped to that slice. Use zoom_box with timestamps to scope the child "
+            "to a visible crop. Falls back to llm_query at maximum recursion depth."
         ),
         fn=rlm_query_fn,
         parameters={
@@ -107,6 +114,12 @@ def make_rlm_query_tool(rlm_query_fn: Callable[..., str]) -> Tool:
                 default=None,
                 description="Optional absolute video end timestamp in seconds.",
             ),
+            "zoom_box": ToolParam(
+                name="zoom_box",
+                type_hint="tuple[float, float, float, float] | None",
+                default=None,
+                description="Optional 0-1000 coordinate box from top-left to zoom into.",
+            ),
         },
         return_type="str",
     )
@@ -120,14 +133,14 @@ def make_rlm_query_batched_tool(rlm_query_batched_fn: Callable[[list[Any]], list
             "Run multiple recursive RLM sub-calls concurrently. Each child gets "
             "a fresh REPL sandbox and iterates independently. Each item can be a "
             "plain prompt string or a dict with prompt/start_s/end_s for "
-            "slice-scoped delegation."
+            "slice-scoped delegation, plus optional zoom_box."
         ),
         fn=rlm_query_batched_fn,
         parameters={
             "queries": ToolParam(
                 name="queries",
                 type_hint="list[str | dict]",
-                description="List of prompt strings or dicts with prompt/start_s/end_s.",
+                description="List of prompt strings or dicts with prompt/start_s/end_s/zoom_box.",
             ),
         },
         return_type="list[str]",

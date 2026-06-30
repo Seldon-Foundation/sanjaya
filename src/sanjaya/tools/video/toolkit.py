@@ -11,11 +11,21 @@ from pydantic import BaseModel, Field
 from ...answer import Evidence
 from ..base import Tool, Toolkit, ToolParam
 from .media import (
+    ZoomBox,
+    compose_zoom_box,
+    expand_zoom_box_to_aspect,
+    get_video_info,
+    validate_zoom_box,
+    video_duration_seconds,
+)
+from .media import (
     extract_frame as _extract_frame_impl,
 )
 from .media import (
-    get_video_info,
-    video_duration_seconds,
+    extract_zoomed_clip as _extract_zoomed_clip_impl,
+)
+from .media import (
+    extract_zoomed_frame as _extract_zoomed_frame_impl,
 )
 from .mount import WorkspaceMount
 from .workspace import ArtifactWorkspace
@@ -41,6 +51,8 @@ If a span is too broad, split it before delegating.
   own current reasoning context so your next root response can directly use it.
   Call it in one iteration, then reason over the attached media in the next root turn.
   If `start_s == end_s`, this becomes a single-frame attachment at that second.
+  Add `zoom_box=(x1, y1, x2, y2)` to crop a region. Coordinates are 0-1000
+  from top-left, and the crop is enlarged to fill the frame.
 
 - `analyze_audio(start_s, end_s, prompt=None)` — transcribe and analyze the audio
   from one explicit, non-zero slice. Returns structured data with transcript,
@@ -53,7 +65,7 @@ If a span is too broad, split it before delegating.
 - `rlm_query(prompt, start_s=..., end_s=...)` gives a child RLM an explicit
   slice assignment. Keep those slices small.
 - Batched `llm_query_batched(...)` and `rlm_query_batched(...)` support dict
-  items with `prompt`, `start_s`, and `end_s`.
+  items with `prompt`, `start_s`, `end_s`, and optional `zoom_box`.
 
 ### Rules
 
@@ -125,6 +137,7 @@ class VideoToolkit(Toolkit):
         self._video_path: str | None = None
         self._question: str | None = None
         self._duration_s: float | None = None
+        self._video_info: dict[str, Any] | None = None
         self._workspace: ArtifactWorkspace | None = None
         self._mount: WorkspaceMount | None = None
 
@@ -136,10 +149,12 @@ class VideoToolkit(Toolkit):
 
         self._modality: str = "balanced"
         self._active_span: tuple[float, float] | None = None
+        self._active_zoom_box: ZoomBox | None = None
 
         self._video_slice_cache: dict[str, str] = {}
         self._audio_slice_cache: dict[str, str] = {}
         self._frame_cache: dict[str, str] = {}
+        self._zoomed_media_cache: dict[str, str] = {}
 
         self._inspections: list[dict[str, Any]] = []
         self._audio_analyses: list[dict[str, Any]] = []
@@ -155,11 +170,14 @@ class VideoToolkit(Toolkit):
         self._question = context.get("question")
         self._modality = context.get("modality", "balanced")
         self._duration_s = video_duration_seconds(self._video_path)
+        self._video_info = None
 
         run_context = context.get("context")
         run_id = run_context.get("run_id") if isinstance(run_context, dict) else None
         active_span = run_context.get("active_video_span") if isinstance(run_context, dict) else None
         self._active_span = self._parse_active_span(active_span)
+        active_zoom_box = run_context.get("active_zoom_box") if isinstance(run_context, dict) else None
+        self._active_zoom_box = validate_zoom_box(active_zoom_box) if active_zoom_box is not None else None
 
         self._workspace = ArtifactWorkspace(base_dir=self.workspace_dir, run_id=run_id)
         self._mount = WorkspaceMount(str(self._workspace.run_dir))
@@ -168,6 +186,7 @@ class VideoToolkit(Toolkit):
         self,
         *,
         active_span: tuple[float, float] | None = None,
+        active_zoom_box: ZoomBox | None = None,
         trace_depth: int | None = None,
     ) -> "VideoToolkit":
         child = VideoToolkit(
@@ -178,6 +197,7 @@ class VideoToolkit(Toolkit):
         child._video_path = self._video_path
         child._question = self._question
         child._duration_s = self._duration_s
+        child._video_info = self._video_info
         child._workspace = self._workspace
         child._mount = self._mount
         child._llm_client = self._llm_client
@@ -188,9 +208,11 @@ class VideoToolkit(Toolkit):
         child._prompt_config = self._prompt_config
         child._modality = self._modality
         child._active_span = active_span if active_span is not None else self._active_span
+        child._active_zoom_box = self.effective_zoom_box(active_zoom_box)
         child._video_slice_cache = self._video_slice_cache
         child._audio_slice_cache = self._audio_slice_cache
         child._frame_cache = self._frame_cache
+        child._zoomed_media_cache = self._zoomed_media_cache
         child._inspections = self._inspections
         child._audio_analyses = self._audio_analyses
         child._single_frame_inspections = self._single_frame_inspections
@@ -222,6 +244,7 @@ class VideoToolkit(Toolkit):
                 "start_s": self._active_span[0],
                 "end_s": self._active_span[1],
             } if self._active_span else None,
+            "active_zoom_box": list(self._active_zoom_box) if self._active_zoom_box else None,
             "uploaded_file_status": {
                 "status": "ready" if self._video_path else "missing",
                 "mode": "native_attachment_with_slice_metadata",
@@ -229,6 +252,7 @@ class VideoToolkit(Toolkit):
                 "cached_video_slices": len(self._video_slice_cache),
                 "cached_audio_slices": len(self._audio_slice_cache),
                 "cached_single_frames": len(self._frame_cache),
+                "cached_zoomed_media": len(self._zoomed_media_cache),
             },
             "recent_inspected_spans": self._inspections[-8:],
             "recent_audio_spans": self._audio_analyses[-8:],
@@ -265,6 +289,8 @@ class VideoToolkit(Toolkit):
                     artifacts={
                         "artifact_path": entry.get("artifact_path"),
                         "prompt": entry.get("prompt"),
+                        "zoom_box": entry.get("zoom_box"),
+                        "effective_zoom_box": entry.get("effective_zoom_box"),
                     },
                 )
             )
@@ -302,6 +328,9 @@ class VideoToolkit(Toolkit):
             parts.append(
                 f"\nActive child span: {start_s:.1f}s to {end_s:.1f}s. Stay within this range unless explicitly reassigned."
             )
+
+        if self._active_zoom_box is not None:
+            parts.append("\nActive zoom: video coordinates are relative to the visible crop.")
 
         if self._modality == "transcript_primary":
             parts.append("\nThis question is audio/transcript-first. Start with `analyze_audio()` on relevant short spans.")
@@ -341,21 +370,33 @@ class VideoToolkit(Toolkit):
         start_s: float,
         end_s: float,
         media_kind: str,
+        zoom_box: object | None = None,
     ) -> dict[str, Any]:
         normalized_start, normalized_end = self._validate_span(
             start_s=start_s,
             end_s=end_s,
             allow_zero=(media_kind == "video"),
         )
+        if media_kind != "video" and zoom_box is not None:
+            raise ValueError("zoom_box is only supported for video media")
+
+        effective_zoom_box = self.effective_zoom_box(zoom_box) if media_kind == "video" else None
+        requested_zoom_box = validate_zoom_box(zoom_box) if zoom_box is not None else None
+        zoom_metadata = self._zoom_metadata(requested_zoom_box, effective_zoom_box)
 
         if media_kind == "video" and normalized_start == normalized_end:
-            artifact_path = self._ensure_frame(normalized_start)
+            artifact_path = (
+                self._ensure_zoomed_frame(normalized_start, effective_zoom_box)
+                if effective_zoom_box is not None
+                else self._ensure_frame(normalized_start)
+            )
             return {
                 "kind": "frame",
                 "start_s": normalized_start,
                 "end_s": normalized_end,
                 "artifact_path": artifact_path,
                 "media": [{"path": artifact_path, "media_type": "image/jpeg"}],
+                **zoom_metadata,
             }
 
         if media_kind == "audio":
@@ -369,14 +410,20 @@ class VideoToolkit(Toolkit):
                 "media": [self._make_video_media_item(normalized_start, normalized_end)],
             }
 
-        artifact_path = self._video_path
-        self._video_slice_cache[self._span_id(normalized_start, normalized_end)] = artifact_path
+        if effective_zoom_box is not None:
+            artifact_path = self._ensure_zoomed_clip(normalized_start, normalized_end, effective_zoom_box)
+            media = [{"path": artifact_path, "media_type": "video/mp4"}]
+        else:
+            artifact_path = self._video_path
+            self._video_slice_cache[self._span_id(normalized_start, normalized_end)] = artifact_path
+            media = [self._make_video_media_item(normalized_start, normalized_end)]
         return {
             "kind": "video",
             "start_s": normalized_start,
             "end_s": normalized_end,
             "artifact_path": artifact_path,
-            "media": [self._make_video_media_item(normalized_start, normalized_end)],
+            "media": media,
+            **zoom_metadata,
         }
 
     def record_inspection(
@@ -390,6 +437,8 @@ class VideoToolkit(Toolkit):
         kind: str,
         source: str,
         model: str,
+        zoom_box: ZoomBox | None = None,
+        effective_zoom_box: ZoomBox | None = None,
     ) -> dict[str, Any]:
         entry = {
             "kind": kind,
@@ -401,6 +450,10 @@ class VideoToolkit(Toolkit):
             "source": source,
             "model": model,
         }
+        if zoom_box is not None:
+            entry["zoom_box"] = list(zoom_box)
+        if effective_zoom_box is not None:
+            entry["effective_zoom_box"] = list(effective_zoom_box)
         self._inspections.append(entry)
         if kind == "frame":
             self._single_frame_inspections.append(entry)
@@ -441,11 +494,13 @@ class VideoToolkit(Toolkit):
         *,
         start_s: float,
         end_s: float,
+        zoom_box: object | None = None,
     ) -> dict[str, Any]:
         request = self.prepare_media_request(
             start_s=start_s,
             end_s=end_s,
             media_kind="video",
+            zoom_box=zoom_box,
         )
         model_label = _model_label(getattr(self._inspect_llm_client, "vision_model", None) or "root_multimodal")
         trace_cm = self._media_trace_context(
@@ -463,6 +518,8 @@ class VideoToolkit(Toolkit):
                 attachment_status="queued",
                 media_kind=request["kind"],
                 artifact_path=request["artifact_path"],
+                zoom_box=request.get("zoom_box"),
+                effective_zoom_box=request.get("effective_zoom_box"),
                 response_preview="Attached to the current root context for the next turn.",
             )
 
@@ -475,6 +532,8 @@ class VideoToolkit(Toolkit):
             kind=request["kind"],
             source="inspect_video",
             model=model_label,
+            zoom_box=request.get("zoom_box"),
+            effective_zoom_box=request.get("effective_zoom_box"),
         )
 
         queued = {
@@ -483,6 +542,8 @@ class VideoToolkit(Toolkit):
             "end_s": request["end_s"],
             "source": "inspect_video",
             "media": request["media"],
+            "zoom_box": request.get("zoom_box"),
+            "effective_zoom_box": request.get("effective_zoom_box"),
         }
         self._pending_root_media.append(queued)
         return queued
@@ -495,15 +556,16 @@ class VideoToolkit(Toolkit):
     def _make_inspect_video_tool(self) -> Tool:
         toolkit = self
 
-        def _inspect_video(start_s: float, end_s: float) -> str:
-            queued = toolkit.queue_root_inspection(start_s=start_s, end_s=end_s)
+        def _inspect_video(start_s: float, end_s: float, zoom_box: object | None = None) -> str:
+            queued = toolkit.queue_root_inspection(start_s=start_s, end_s=end_s, zoom_box=zoom_box)
+            zoom_suffix = " with zoom" if queued.get("effective_zoom_box") else ""
             if queued["kind"] == "frame":
                 return (
-                    f"Queued frame attachment at {queued['start_s']:.1f}s for the next "
+                    f"Queued frame attachment{zoom_suffix} at {queued['start_s']:.1f}s for the next "
                     "root-model turn."
                 )
             return (
-                f"Queued video attachment [{queued['start_s']:.1f}s - {queued['end_s']:.1f}s] "
+                f"Queued video attachment{zoom_suffix} [{queued['start_s']:.1f}s - {queued['end_s']:.1f}s] "
                 "for the next root-model turn."
             )
 
@@ -512,12 +574,19 @@ class VideoToolkit(Toolkit):
             description=(
                 "Attach one explicit slice of the video to the current root-model context. "
                 "This is promptless: the next root turn will directly see the slice. "
-                "If start_s == end_s, this attaches a single frame."
+                "If start_s == end_s, this attaches a single frame. "
+                "Use zoom_box=(x1,y1,x2,y2) with 0-1000 coordinates to zoom into a region."
             ),
             fn=_inspect_video,
             parameters={
                 "start_s": ToolParam(name="start_s", type_hint="float", description="Absolute start time in seconds."),
                 "end_s": ToolParam(name="end_s", type_hint="float", description="Absolute end time in seconds."),
+                "zoom_box": ToolParam(
+                    name="zoom_box",
+                    type_hint="tuple[float, float, float, float] | None",
+                    default=None,
+                    description="Optional 0-1000 coordinate box from top-left to zoom into.",
+                ),
             },
             return_type="str",
         )
@@ -680,6 +749,28 @@ class VideoToolkit(Toolkit):
             return None
         return (float(start_s), float(end_s))
 
+    def resolve_zoom_box(self, zoom_box: object | None) -> ZoomBox | None:
+        return compose_zoom_box(self._active_zoom_box, zoom_box)
+
+    def effective_zoom_box(self, zoom_box: object | None) -> ZoomBox | None:
+        resolved = self.resolve_zoom_box(zoom_box)
+        if resolved is None:
+            return None
+        width, height = self._source_dimensions()
+        return expand_zoom_box_to_aspect(resolved, source_width=width, source_height=height)
+
+    def _zoom_metadata(
+        self,
+        requested_zoom_box: ZoomBox | None,
+        effective_zoom_box: ZoomBox | None,
+    ) -> dict[str, Any]:
+        metadata: dict[str, Any] = {}
+        if requested_zoom_box is not None:
+            metadata["zoom_box"] = requested_zoom_box
+        if effective_zoom_box is not None:
+            metadata["effective_zoom_box"] = effective_zoom_box
+        return metadata
+
     def _validate_span(
         self,
         *,
@@ -740,6 +831,17 @@ class VideoToolkit(Toolkit):
             },
         }
 
+    def _source_dimensions(self) -> tuple[int, int]:
+        if self._video_path is None:
+            raise ValueError("No video loaded")
+        if self._video_info is None:
+            self._video_info = get_video_info(self._video_path)
+        width = int(self._video_info.get("width") or 0)
+        height = int(self._video_info.get("height") or 0)
+        if width <= 0 or height <= 0:
+            raise ValueError("Could not determine source video dimensions for zoom")
+        return width, height
+
     def _ensure_frame(self, at_s: float) -> str:
         if self._workspace is None or self._video_path is None:
             raise ValueError("Workspace not initialized")
@@ -757,8 +859,54 @@ class VideoToolkit(Toolkit):
         self._frame_cache[frame_id] = frame_path
         return frame_path
 
+    def _ensure_zoomed_frame(self, at_s: float, zoom_box: ZoomBox) -> str:
+        if self._workspace is None or self._video_path is None:
+            raise ValueError("Workspace not initialized")
+        width, height = self._source_dimensions()
+        frame_id = f"{self._frame_id(at_s)}_{self._zoom_id(zoom_box)}"
+        cached = self._zoomed_media_cache.get(frame_id)
+        if cached and Path(cached).exists():
+            return cached
+
+        output_path = self._workspace.frame_path(frame_id)
+        frame_path = _extract_zoomed_frame_impl(
+            video_path=self._video_path,
+            at_s=at_s,
+            output_path=str(output_path),
+            zoom_box=zoom_box,
+            source_width=width,
+            source_height=height,
+        )
+        self._zoomed_media_cache[frame_id] = frame_path
+        return frame_path
+
+    def _ensure_zoomed_clip(self, start_s: float, end_s: float, zoom_box: ZoomBox) -> str:
+        if self._workspace is None or self._video_path is None:
+            raise ValueError("Workspace not initialized")
+        width, height = self._source_dimensions()
+        clip_id = f"clip_{self._span_id(start_s, end_s)}_{self._zoom_id(zoom_box)}"
+        cached = self._zoomed_media_cache.get(clip_id)
+        if cached and Path(cached).exists():
+            return cached
+
+        output_path = self._workspace.clip_path(clip_id)
+        clip_path = _extract_zoomed_clip_impl(
+            video_path=self._video_path,
+            start_s=start_s,
+            end_s=end_s,
+            output_path=str(output_path),
+            zoom_box=zoom_box,
+            source_width=width,
+            source_height=height,
+        )
+        self._zoomed_media_cache[clip_id] = clip_path
+        return clip_path
+
     def _span_id(self, start_s: float, end_s: float) -> str:
         return f"{int(round(start_s * 1000)):010d}_{int(round(end_s * 1000)):010d}"
 
     def _frame_id(self, at_s: float) -> str:
         return f"frame_{int(round(at_s * 1000)):010d}"
+
+    def _zoom_id(self, zoom_box: ZoomBox) -> str:
+        return "zoom_" + "_".join(str(int(round(value))) for value in zoom_box)

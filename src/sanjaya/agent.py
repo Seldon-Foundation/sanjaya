@@ -108,6 +108,9 @@ class Agent:
         *,
         prompts: PromptConfig | None = None,
         provider: Provider | None = None,
+        auto_transcribe_video: bool = True,
+        transcription_model: str = "whisper-1",
+        transcription_language: str | None = None,
         max_iterations: int = 8,
         max_depth: int = 1,
         max_budget_usd: float | None = None,
@@ -140,6 +143,9 @@ class Agent:
         self.audio_model = audio_model
         self.caption_model = caption_model
         self.fallback_model = fallback_model
+        self.auto_transcribe_video = auto_transcribe_video
+        self.transcription_model = transcription_model
+        self.transcription_language = transcription_language
         self.max_iterations = max_iterations
         self._max_depth = max_depth
         self._depth = 0  # always 0 for user-created agents
@@ -263,6 +269,102 @@ class Agent:
         client._media_binary_cache = self._sub_llm._media_binary_cache
         return client
 
+    def _prepare_video_transcript(self, video: str, subtitle: str | None) -> dict[str, Any]:
+        from .tools.video.transcription import prepare_video_transcript
+
+        result = prepare_video_transcript(
+            video_path=video,
+            explicit_transcript_path=subtitle,
+            api_model=self.transcription_model,
+            language=self.transcription_language,
+        )
+        return self._repl_transcript(result.transcript)
+
+    def _repl_transcript(self, transcript: dict[str, Any]) -> dict[str, Any]:
+        segments: list[dict[str, Any]] = []
+        for segment in transcript.get("segments", []):
+            entry = {
+                "index": len(segments),
+                "start_s": segment.get("start_s"),
+                "end_s": segment.get("end_s"),
+                "text": segment.get("text", ""),
+            }
+            if segment.get("speaker") is not None:
+                entry["speaker"] = segment["speaker"]
+            segments.append(entry)
+
+        source_metadata = transcript.get("metadata") or {}
+        metadata = {
+            "segment_count": len(segments),
+        }
+        for key in ("language", "speaker_label_scope", "active_video_span"):
+            if key in source_metadata:
+                metadata[key] = source_metadata[key]
+
+        return {
+            "text": " ".join(str(segment.get("text", "")).strip() for segment in segments).strip(),
+            "segments": segments,
+            "metadata": metadata,
+        }
+
+    def _slice_transcript(
+        self,
+        transcript: dict[str, Any] | None,
+        active_span: tuple[float, float] | None,
+    ) -> dict[str, Any] | None:
+        if transcript is None or active_span is None:
+            return transcript
+
+        start_s, end_s = active_span
+        segments: list[dict[str, Any]] = []
+        for segment in transcript.get("segments", []):
+            try:
+                seg_start = float(segment["start_s"])
+                seg_end = float(segment["end_s"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if seg_end <= start_s or seg_start >= end_s:
+                continue
+            entry = dict(segment)
+            entry["index"] = len(segments)
+            segments.append(entry)
+
+        metadata = dict(transcript.get("metadata") or {})
+        metadata["active_video_span"] = {"start_s": start_s, "end_s": end_s}
+        metadata["segment_count"] = len(segments)
+        return {
+            "text": " ".join(str(segment.get("text", "")).strip() for segment in segments).strip(),
+            "segments": segments,
+            "metadata": metadata,
+        }
+
+    def _transcript_prompt_section(self, transcript: dict[str, Any] | None) -> str | None:
+        if not transcript:
+            return None
+        return (
+            "## Transcript\n"
+            "A `transcript` dict is available in the REPL. Use it for spoken words and timestamps before "
+            "calling `analyze_audio()`.\n"
+            "Shape: `{'text': str, 'segments': [{'start_s': float, 'end_s': float, "
+            "'speaker': str, 'text': str}], 'metadata': dict}`. Some segments may not have `speaker`.\n"
+            "`llm_query()` is text-only unless you include the relevant transcript excerpt in its prompt."
+        )
+
+    def _runtime_prompt_sections(
+        self,
+        registry: ToolRegistry,
+        transcript: dict[str, Any] | None = None,
+    ) -> list[str]:
+        sections = [
+            section
+            for toolkit in registry.toolkits
+            if (section := toolkit.prompt_section())
+        ]
+        transcript_section = self._transcript_prompt_section(transcript)
+        if transcript_section:
+            sections.append(transcript_section)
+        return sections
+
     def _find_video_toolkit(self, registry: ToolRegistry) -> Any | None:
         try:
             from .tools.video import VideoToolkit
@@ -279,6 +381,7 @@ class Agent:
         *,
         parent_registry: ToolRegistry,
         active_span: tuple[float, float] | None,
+        active_zoom_box: object | None,
         depth: int,
     ) -> list[Toolkit]:
         child_toolkits: list[Toolkit] = []
@@ -286,7 +389,13 @@ class Agent:
             spawn_child = getattr(toolkit, "spawn_child", None)
             if callable(spawn_child):
                 try:
-                    child_toolkits.append(spawn_child(active_span=active_span, trace_depth=depth))
+                    child_toolkits.append(
+                        spawn_child(
+                            active_span=active_span,
+                            active_zoom_box=active_zoom_box,
+                            trace_depth=depth,
+                        )
+                    )
                     continue
                 except TypeError:
                     child_toolkits.append(spawn_child())
@@ -330,7 +439,7 @@ class Agent:
 
     def _normalize_query_entry(self, entry: Any, *, tool_name: str) -> dict[str, Any]:
         if isinstance(entry, str):
-            return {"prompt": entry, "start_s": None, "end_s": None}
+            return {"prompt": entry, "start_s": None, "end_s": None, "zoom_box": None}
         if not isinstance(entry, dict):
             raise TypeError(f"{tool_name} expects each query to be a string or dict")
 
@@ -342,11 +451,15 @@ class Agent:
         end_s = entry.get("end_s")
         if (start_s is None) != (end_s is None):
             raise ValueError(f"{tool_name} requires both start_s and end_s when scoping media")
+        zoom_box = entry.get("zoom_box")
+        if zoom_box is not None and (start_s is None or end_s is None):
+            raise ValueError(f"{tool_name} requires start_s and end_s when zoom_box is provided")
 
         return {
             "prompt": prompt,
             "start_s": start_s,
             "end_s": end_s,
+            "zoom_box": zoom_box,
         }
 
     def _run_sub_llm_query(
@@ -357,6 +470,7 @@ class Agent:
         prompt: str,
         start_s: float | None = None,
         end_s: float | None = None,
+        zoom_box: object | None = None,
         source: str = "llm_query",
         batched: bool = False,
         budget: BudgetTracker | None = None,
@@ -367,6 +481,8 @@ class Agent:
         budget = budget or self._budget
 
         if start_s is None and end_s is None:
+            if zoom_box is not None:
+                raise ValueError("zoom_box requires both start_s and end_s")
             with self._tracer.llm_call(
                 model=_model_label(self.sub_model),
                 prompt=prompt,
@@ -396,6 +512,7 @@ class Agent:
             start_s=float(start_s),
             end_s=float(end_s),
             media_kind="video",
+            zoom_box=zoom_box,
         )
         media_model = _model_label(llm_client.vision_model)
         trace_cm = video_toolkit._media_trace_context(
@@ -416,7 +533,12 @@ class Agent:
             if repl is not None:
                 repl.record_llm_query(prompt, response)
             media_trace.record_response(response)
-            media_trace.record(media_kind=request["kind"], artifact_path=request["artifact_path"])
+            media_trace.record(
+                media_kind=request["kind"],
+                artifact_path=request["artifact_path"],
+                zoom_box=request.get("zoom_box"),
+                effective_zoom_box=request.get("effective_zoom_box"),
+            )
             self._record_client_usage(
                 client=llm_client,
                 budget=budget,
@@ -433,6 +555,8 @@ class Agent:
             kind=request["kind"],
             source=source,
             model=media_model,
+            zoom_box=request.get("zoom_box"),
+            effective_zoom_box=request.get("effective_zoom_box"),
         )
         return response
 
@@ -474,6 +598,10 @@ class Agent:
             self._bind_toolkit_runtime(it)
             self._registry.register_toolkit(it)
 
+        transcript: dict[str, Any] | None = None
+        if video and self.auto_transcribe_video:
+            transcript = self._prepare_video_transcript(video, subtitle)
+
         # Build context dict for toolkits (modality classified later, inside the
         # completion span, so the sub_llm call shows up under sanjaya.completion)
         context_dict: dict[str, Any] = {
@@ -481,6 +609,7 @@ class Agent:
             "context": context,
             "video": video,
             "subtitle": subtitle,
+            "transcript": transcript,
             "document": document,
             "image": image,
             "modality": "balanced",
@@ -497,6 +626,7 @@ class Agent:
         repl = AgentREPL(
             registry=run_registry,
             context=context,
+            inputs={"transcript": transcript} if transcript else None,
         )
 
         # Set up OS access from video toolkit if available
@@ -507,13 +637,19 @@ class Agent:
                     repl.set_os_access(os_access)
 
         # Create builtin tool closures
-        def _llm_query(prompt: str, start_s: float | None = None, end_s: float | None = None) -> str:
+        def _llm_query(
+            prompt: str,
+            start_s: float | None = None,
+            end_s: float | None = None,
+            zoom_box: object | None = None,
+        ) -> str:
             return self._run_sub_llm_query(
                 registry=run_registry,
                 repl=repl,
                 prompt=prompt,
                 start_s=start_s,
                 end_s=end_s,
+                zoom_box=zoom_box,
                 source="llm_query",
                 budget=self._budget,
                 trace_depth=1,
@@ -533,6 +669,7 @@ class Agent:
                         prompt=entry["prompt"],
                         start_s=entry["start_s"],
                         end_s=entry["end_s"],
+                        zoom_box=entry["zoom_box"],
                         source="llm_query_batched",
                         batched=True,
                         budget=self._budget,
@@ -553,6 +690,11 @@ class Agent:
                 toolkit_state = toolkit.get_state()
                 if toolkit_state:
                     state.update(toolkit_state)
+            if transcript:
+                state["transcript"] = {
+                    "segment_count": len(transcript.get("segments", [])),
+                    "metadata": transcript.get("metadata", {}),
+                }
             return state
 
         # Register builtins
@@ -564,15 +706,24 @@ class Agent:
 
         # Register rlm_query builtins (only when recursion is enabled)
         if self._max_depth > 1:
-            def _rlm_query(prompt: str, start_s: float | None = None, end_s: float | None = None) -> str:
+            def _rlm_query(
+                prompt: str,
+                start_s: float | None = None,
+                end_s: float | None = None,
+                zoom_box: object | None = None,
+            ) -> str:
                 if (start_s is None) != (end_s is None):
                     raise ValueError("Slice-scoped rlm_query calls require both start_s and end_s")
+                if zoom_box is not None and (start_s is None or end_s is None):
+                    raise ValueError("zoom_box requires both start_s and end_s")
                 return self._subcall(
                     prompt,
                     depth=1,
                     parent_run_registry=run_registry,
                     parent_context=context,
+                    transcript=transcript,
                     active_span=(float(start_s), float(end_s)) if start_s is not None and end_s is not None else None,
+                    active_zoom_box=zoom_box,
                 )
 
             def _rlm_query_batched(queries: list[Any]) -> list[str]:
@@ -586,11 +737,13 @@ class Agent:
                             depth=1,
                             parent_run_registry=run_registry,
                             parent_context=context,
+                            transcript=transcript,
                             active_span=(
                                 (float(entry["start_s"]), float(entry["end_s"]))
                                 if entry["start_s"] is not None and entry["end_s"] is not None
                                 else None
                             ),
+                            active_zoom_box=entry["zoom_box"],
                         )
                         for entry in normalized
                     ]
@@ -600,11 +753,7 @@ class Agent:
             run_registry.register(make_rlm_query_batched_tool(_rlm_query_batched))
 
         # Build system prompt
-        toolkit_sections = [
-            tk.prompt_section()
-            for tk in run_registry.toolkits
-            if tk.prompt_section()
-        ]
+        toolkit_sections = self._runtime_prompt_sections(run_registry, transcript)
 
         context_metadata: dict[str, Any] = {}
         if context is not None:
@@ -654,11 +803,7 @@ class Agent:
                         for toolkit in run_registry.toolkits:
                             if hasattr(toolkit, "_modality"):
                                 toolkit._modality = modality
-                        toolkit_sections = [
-                            tk.prompt_section()
-                            for tk in run_registry.toolkits
-                            if tk.prompt_section()
-                        ]
+                        toolkit_sections = self._runtime_prompt_sections(run_registry, transcript)
                         system_prompt = build_system_prompt(
                             registry=run_registry,
                             context_metadata=context_metadata,
@@ -780,7 +925,9 @@ class Agent:
         depth: int,
         parent_run_registry: ToolRegistry,
         parent_context: Any = None,
+        transcript: dict[str, Any] | None = None,
         active_span: tuple[float, float] | None = None,
+        active_zoom_box: object | None = None,
     ) -> str:
         """Run a recursive RLM sub-call with its own REPL and loop.
 
@@ -797,17 +944,21 @@ class Agent:
             child_model=child_model_name,
             start_s=active_span[0] if active_span is not None else None,
             end_s=active_span[1] if active_span is not None else None,
+            zoom_box=active_zoom_box,
         ) as subcall_trace:
             try:
-                if active_span is not None:
+                if active_span is not None or active_zoom_box is not None:
                     video_toolkit = self._find_video_toolkit(parent_run_registry)
                     if video_toolkit is None:
-                        raise ValueError("Slice-scoped rlm_query calls require an active VideoToolkit")
-                    video_toolkit._validate_span(
-                        start_s=active_span[0],
-                        end_s=active_span[1],
-                        allow_zero=True,
-                    )
+                        raise ValueError("Slice-scoped or zoomed rlm_query calls require an active VideoToolkit")
+                    if active_span is not None:
+                        video_toolkit._validate_span(
+                            start_s=active_span[0],
+                            end_s=active_span[1],
+                            allow_zero=True,
+                        )
+                    if active_zoom_box is not None:
+                        video_toolkit.effective_zoom_box(active_zoom_box)
 
                 if depth >= self._max_depth:
                     _console.print(f"[dim]rlm_query d{depth}: leaf node, falling back to llm_query[/]")
@@ -818,6 +969,7 @@ class Agent:
                         prompt=prompt,
                         start_s=active_span[0] if active_span is not None else None,
                         end_s=active_span[1] if active_span is not None else None,
+                        zoom_box=active_zoom_box,
                         source="rlm_query_leaf",
                         budget=self._budget,
                         trace_depth=depth,
@@ -832,6 +984,7 @@ class Agent:
                 child_toolkits = self._spawn_child_toolkits(
                     parent_registry=parent_run_registry,
                     active_span=active_span,
+                    active_zoom_box=active_zoom_box,
                     depth=depth,
                 )
                 inherited_tools = [
@@ -854,8 +1007,13 @@ class Agent:
                         "start_s": active_span[0],
                         "end_s": active_span[1],
                     }
+                child_transcript = self._slice_transcript(transcript, active_span)
 
-                repl = AgentREPL(registry=child_registry, context=child_context)
+                repl = AgentREPL(
+                    registry=child_registry,
+                    context=child_context,
+                    inputs={"transcript": child_transcript} if child_transcript else None,
+                )
 
                 for toolkit in child_registry.toolkits:
                     if hasattr(toolkit, "get_os_access"):
@@ -876,13 +1034,19 @@ class Agent:
                     max_timeout_s=remaining_timeout,
                 )
 
-                def _child_llm_query(p: str, start_s: float | None = None, end_s: float | None = None) -> str:
+                def _child_llm_query(
+                    p: str,
+                    start_s: float | None = None,
+                    end_s: float | None = None,
+                    zoom_box: object | None = None,
+                ) -> str:
                     return self._run_sub_llm_query(
                         registry=child_registry,
                         repl=repl,
                         prompt=p,
                         start_s=start_s,
                         end_s=end_s,
+                        zoom_box=zoom_box,
                         source="llm_query",
                         budget=child_budget,
                         trace_depth=depth + 1,
@@ -901,6 +1065,7 @@ class Agent:
                                 prompt=entry["prompt"],
                                 start_s=entry["start_s"],
                                 end_s=entry["end_s"],
+                                zoom_box=entry["zoom_box"],
                                 source="llm_query_batched",
                                 batched=True,
                                 budget=child_budget,
@@ -911,15 +1076,24 @@ class Agent:
                         ]
                         return [future.result() for future in futures]
 
-                def _child_rlm_query(p: str, start_s: float | None = None, end_s: float | None = None) -> str:
+                def _child_rlm_query(
+                    p: str,
+                    start_s: float | None = None,
+                    end_s: float | None = None,
+                    zoom_box: object | None = None,
+                ) -> str:
                     if (start_s is None) != (end_s is None):
                         raise ValueError("Slice-scoped rlm_query calls require both start_s and end_s")
+                    if zoom_box is not None and (start_s is None or end_s is None):
+                        raise ValueError("zoom_box requires both start_s and end_s")
                     return self._subcall(
                         p,
                         depth=depth + 1,
                         parent_run_registry=child_registry,
                         parent_context=child_context,
+                        transcript=child_transcript,
                         active_span=(float(start_s), float(end_s)) if start_s is not None and end_s is not None else None,
+                        active_zoom_box=zoom_box,
                     )
 
                 def _child_rlm_query_batched(queries: list[Any]) -> list[str]:
@@ -933,11 +1107,13 @@ class Agent:
                                 depth=depth + 1,
                                 parent_run_registry=child_registry,
                                 parent_context=child_context,
+                                transcript=child_transcript,
                                 active_span=(
                                     (float(entry["start_s"]), float(entry["end_s"]))
                                     if entry["start_s"] is not None and entry["end_s"] is not None
                                     else None
                                 ),
+                                active_zoom_box=entry["zoom_box"],
                             )
                             for entry in normalized
                         ]
@@ -954,6 +1130,11 @@ class Agent:
                         toolkit_state = toolkit.get_state()
                         if toolkit_state:
                             state.update(toolkit_state)
+                    if child_transcript:
+                        state["transcript"] = {
+                            "segment_count": len(child_transcript.get("segments", [])),
+                            "metadata": child_transcript.get("metadata", {}),
+                        }
                     return state
 
                 child_registry.register(make_context_tool(lambda: repl.context))
@@ -968,11 +1149,7 @@ class Agent:
                 if active_span is not None:
                     context_metadata["active_video_span"] = f"{active_span[0]:.1f}s-{active_span[1]:.1f}s"
 
-                toolkit_sections = [
-                    tk.prompt_section()
-                    for tk in child_registry.toolkits
-                    if tk.prompt_section()
-                ]
+                toolkit_sections = self._runtime_prompt_sections(child_registry, child_transcript)
 
                 system_prompt = build_system_prompt(
                     registry=child_registry,

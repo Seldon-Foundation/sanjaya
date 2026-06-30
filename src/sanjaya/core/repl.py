@@ -21,11 +21,13 @@ class AgentREPL:
         self,
         registry: ToolRegistry,
         context: Any = None,
+        inputs: dict[str, Any] | None = None,
         os_access: Any | None = None,
     ):
         self.monty = MontyRepl()
         self.registry = registry
         self.context = context
+        self.inputs = dict(inputs or {})
         self._os_access = os_access
 
         # Per-execution state
@@ -51,6 +53,10 @@ class AgentREPL:
     def set_context(self, context: Any) -> None:
         """Update the context variable."""
         self.context = context
+
+    def set_inputs(self, inputs: dict[str, Any] | None) -> None:
+        """Update globals injected into each sandbox execution."""
+        self.inputs = dict(inputs or {})
 
     def set_os_access(self, os_access: Any | None) -> None:
         """Update the Monty filesystem mount."""
@@ -92,6 +98,8 @@ class AgentREPL:
                 "external_functions": external_functions,
                 "print_callback": self._print_callback,
             }
+            if self.inputs:
+                feed_kwargs["inputs"] = self.inputs
             if self._os_access is not None:
                 feed_kwargs["os"] = self._os_access
 

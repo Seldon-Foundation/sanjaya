@@ -100,6 +100,8 @@ def _drain_pending_root_media(repl: AgentREPL) -> tuple[list[dict[str, Any]], li
                 "start_s": entry.get("start_s"),
                 "end_s": entry.get("end_s"),
                 "source": entry.get("source"),
+                "zoom_box": entry.get("zoom_box"),
+                "effective_zoom_box": entry.get("effective_zoom_box"),
             })
     return media, metadata
 

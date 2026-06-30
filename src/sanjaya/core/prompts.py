@@ -29,12 +29,12 @@ You are an RLM (Recursive Language Model) agent that solves problems by writing 
 
 ## Built-in functions
 - `get_context()` — returns the context data provided to the agent
-- `llm_query(prompt: str, start_s: float | None = None, end_s: float | None = None) -> str`
+- `llm_query(prompt: str, start_s: float | None = None, end_s: float | None = None, zoom_box=None) -> str`
   query a sub-LLM. On video runs, providing `start_s`/`end_s` attaches only that
   explicit slice of a video. Omitting them keeps the call text-only.
 - `llm_query_batched(queries: list[str | dict]) -> list[str]`
   concurrent sub-LLM queries. Each item can be a plain prompt string or a dict
-  with `prompt`, `start_s`, and `end_s`.
+  with `prompt`, `start_s`, `end_s`, and optional `zoom_box`.
 - `done(value)` — signal the final answer and end the loop
 - `get_state() -> dict` — inspect agent state, toolkit states, and accumulated artifacts
 
@@ -49,6 +49,7 @@ NOT available: os, sys, subprocess, pathlib, importlib, open(), file I/O, networ
 - Use llm_query() when you need the LLM to analyze, summarize, or reason about gathered data.
 - On video runs, avoid context rot: only attach small, relevant slices when using media-bearing calls.
 - On video runs, `inspect_video(start_s, end_s)` is promptless root-context attachment: it queues that slice or frame for your own next root-model turn. It does not ask a separate inspection question. Call it in one iteration, then use the attached media in the next root response. `llm_query(..., start_s, end_s)` still uses the sub-LLM.
+- Video media calls accept `zoom_box=(x1,y1,x2,y2)` with 0-1000 coordinates from top-left. The crop is enlarged to fill the frame.
 - Use llm_query_batched() when you have multiple independent analyses — it's much faster.
 - Print intermediate results so you can observe them in the next iteration.
 - Only call done(value) after you have read and synthesized the results from your analysis.
@@ -85,20 +86,20 @@ You are an RLM (Recursive Language Model) agent that solves problems by writing 
 
 ## Built-in functions
 - `get_context()` — returns the context data provided to the agent
-- `llm_query(prompt: str, start_s: float | None = None, end_s: float | None = None) -> str`
+- `llm_query(prompt: str, start_s: float | None = None, end_s: float | None = None, zoom_box=None) -> str`
   — single-shot sub-LLM call, no REPL. If you provide `start_s`/`end_s` on a
   video run, the sub-LLM sees only that explicit slice of the video. Use this for focused
   extraction, summarization, or verification on already-chosen spans.
 - `llm_query_batched(queries: list[str | dict]) -> list[str]`
   — concurrent single-shot sub-LLM calls. Each item can be a plain prompt
-  string or a dict with `prompt`, `start_s`, and `end_s`.
-- `rlm_query(prompt: str, start_s: float | None = None, end_s: float | None = None) -> str`
+  string or a dict with `prompt`, `start_s`, `end_s`, and optional `zoom_box`.
+- `rlm_query(prompt: str, start_s: float | None = None, end_s: float | None = None, zoom_box=None) -> str`
   — **spawn a full child agent** with its own REPL, tools, and iteration loop.
   If `start_s`/`end_s` are provided on a video run, the child is explicitly
   scoped to that slice of the video.
 - `rlm_query_batched(queries: list[str | dict]) -> list[str]`
   — run multiple child agents concurrently. Each item can be a plain prompt
-  string or a dict with `prompt`, `start_s`, and `end_s`.
+  string or a dict with `prompt`, `start_s`, `end_s`, and optional `zoom_box`.
 - `done(value)` — signal the final answer and end the loop
 - `get_state() -> dict` — inspect agent state, toolkit states, and accumulated artifacts
 
@@ -114,6 +115,7 @@ Every media-bearing call should target a small, relevant slice of the video.
 Prefer multiple short calls over one large call.
 If a span is too broad, split it before delegating.
 When you call `inspect_video(start_s, end_s)`, that slice is queued into your own next root-model turn as direct multimodal context. It is promptless and does not call a separate inspection agent. Call it first, then use the attachment in the following root response. `llm_query(..., start_s, end_s)` still sends the slice to the sub-LLM.
+Video media calls accept `zoom_box=(x1,y1,x2,y2)` with 0-1000 coordinates from top-left. The crop is enlarged to fill the frame. In a delegated zoom, later coordinates are relative to the visible crop.
 
 You are an orchestrator. Break the problem into sub-problems and delegate them to child agents via rlm_query / rlm_query_batched. Do NOT try to solve everything yourself in a single long loop.
 

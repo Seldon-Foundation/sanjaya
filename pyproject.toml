@@ -27,6 +27,7 @@ dependencies = [
     "nest-asyncio>=1.6.0",
     "moondream-station>=0.1.9",
     "parakeet-mlx>=0.5.1",
+    "openai>=2.0",
     "fastapi>=0.135.3",
     "uvicorn>=0.43.0",
     "huggingface-hub[cli]>=1.9.0",
